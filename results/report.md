@@ -27,3 +27,11 @@ benchmark is <1%, for context.
 
 See results/results.json + results/solve_all.log for the final run's numbers
 (run may have been cut by session termination; partial rows are valid).
+
+## Final recorded run (results.json)
+- xg01: 4/6 levels, env score 0.2355, actions {'1': 8, '2': 432, '3': 42, '4': 277, '5': 564}
+- rt02: 2/6 levels, env score 0.1295, actions {'1': 17, '2': 4, '3': 192}
+- fl03: 0/6 levels, env score 0.0, actions {'1': 108}
+- pb04: 1/6 levels, env score 0.0476, actions {'1': 7, '2': 336}
+- sq05: 2/6 levels, env score 0.0035, actions {'1': 37, '2': 65, '3': 132}
+TOTAL RHAE 0.0832 (5x-budget 0.0449), levels 9/30
