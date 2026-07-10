@@ -124,9 +124,13 @@ class DRLQNSolver:
             t[0] += 1
             t[1] += int(changed)
         if changed and cur.level == nxt.level:
-            ys, xs = np.where(cur.grid != nxt.grid)
-            if len(ys):
-                self.last_change = (float(ys.mean()), float(xs.mean()))
+            if lam >= 5:                       # anchor on the click coordinate
+                _, x, y = to_env_action(lam, cur.objs)
+                self.last_change = (float(y), float(x))
+            else:
+                ys, xs = np.where(cur.grid != nxt.grid)
+                if len(ys):
+                    self.last_change = (float(ys.mean()), float(xs.mean()))
         elif cur.level != nxt.level:
             self.last_change = None
         if lam < 4 and changed:                    # possible self-object motion
@@ -154,12 +158,29 @@ class DRLQNSolver:
         c, v = max(self.self_votes.items(), key=lambda kv: kv[1])
         return c if v >= 2 else None
 
+    def _potential(self, node: NodeInfo) -> float:
+        """Relational progress potential: closeness of the two nearest salient
+        (unique-color, small) objects, self excluded. Core-knowledge style
+        "bring distinct special things together" curiosity signal."""
+        sc = self._self_color()
+        sal = [o for o in node.objs
+               if o.area < 400 and o.color != sc
+               and sum(1 for p in node.objs if p.color == o.color) == 1]
+        best = None
+        for i in range(len(sal)):
+            for j in range(i + 1, len(sal)):
+                if sal[i].color == sal[j].color:
+                    continue
+                d = abs(sal[i].cy - sal[j].cy) + abs(sal[i].cx - sal[j].cx)
+                best = d if best is None else min(best, d)
+        return -(best or 0.0) / 64.0
+
     def _prior_bonus(self, node: NodeInfo, lam: int) -> float:
         bonus = 0.0
         k = self._afford_key(node, lam)
         if k is not None and k[0] != "key":
             t = self.afford.get(k, [0, 0])
-            bonus += 3.0 * (t[1] + 1) / (t[0] + 2)          # affordance ratio
+            bonus += 2.0 * (t[1] + 1) / (t[0] + 2)          # affordance ratio
             if k[1] == 0:
                 bonus += 0.3                                # centre-click prior
             _, cx, cy = to_env_action(lam, node.objs)
@@ -175,7 +196,7 @@ class DRLQNSolver:
                 bonus += 1.0 * max(0.0, 1.0 - d_far / 96.0)  # progress toward the other
             if self.last_change is not None:
                 d = abs(self.last_change[0] - cy) + abs(self.last_change[1] - cx)
-                bonus += 1.5 * max(0.0, 1.0 - d / 16.0)      # continue where it changed
+                bonus += 1.0 * max(0.0, 1.0 - d / 12.0)      # continue where it changed
         if lam < 4:
             sc = self._self_color()
             d = self.move_dir.get(lam)
@@ -237,28 +258,45 @@ class DRLQNSolver:
             self.q_margins.append(float(vals[0] - vals[1]))
         return q
 
+    def _click_group(self, node: NodeInfo, lam: int):
+        """Effect-equivalence group of a click: the small object containing the
+        click pixel (clicks inside one small object are duplicate edges)."""
+        _, x, y = to_env_action(lam, node.objs)
+        col = node.grid[y, x]
+        best = None
+        for o in node.objs:
+            if o.area < 200 and o.color == col and o.y0 <= y <= o.y1 \
+                    and o.x0 <= x <= o.x1:
+                if best is None or o.area < best.area:
+                    best = o
+        if best is not None:
+            return ("obj", best.color, best.y0, best.x0)
+        return ("px", x, y)
+
     def select(self, node: NodeInfo, actions_taken: int) -> int | None:
         tried = self.graph.get(node.key, {})
         valid_ids = np.where(node.valid)[0]
-        # dedupe click lambdas that resolve to coordinates already tried here
-        tried_coords = {to_env_action(l, node.objs)[1:] for l in tried if l >= 5}
+        # dedupe click lambdas by effect group (same small object / same pixel)
+        seen_groups = {self._click_group(node, l) for l in tried if l >= 5}
         untried = []
-        seen_coords = set(tried_coords)
         for l in valid_ids:
             if l in tried:
                 continue
             if l >= 5:
-                xy = to_env_action(l, node.objs)[1:]
-                if xy in seen_coords:
+                grp = self._click_group(node, int(l))
+                if grp in seen_groups:
                     continue
-                seen_coords.add(xy)
+                seen_groups.add(grp)
             untried.append(int(l))
         eps = max(0.08, 0.35 * np.exp(-actions_taken / 400.0))
         if untried:
             if self.rng.random() < eps:
                 return int(self.rng.choice(untried))
             q = self.q_of(node)
-            return int(max(untried, key=lambda l: q[l] + self._prior_bonus(node, l)))
+            # priors order exploration early on, then hand over to Q
+            w = max(0.3, 1.5 * np.exp(-self.updates / 300.0))
+            return int(max(untried,
+                           key=lambda l: q[l] + w * self._prior_bonus(node, l)))
         # frontier routing: BFS through the known deterministic graph
         step = self._route_to_frontier(node)
         return step
@@ -313,6 +351,8 @@ class DRLQNSolver:
                       + (10.0 if step.level_won and not step.env_won else 0.0)
                       + (0.5 if is_new else 0.0)
                       + (-0.3 if not changed else 0.0))
+            if changed and not step.level_won and cur.level == nxt.level:
+                reward += 0.6 * (self._potential(nxt) - self._potential(cur))
             self.graph.setdefault(cur.key, {})[lam] = nxt.key
             self._update_priors(cur, lam, nxt, changed)
             self.replay.push(Transition(

@@ -5,8 +5,9 @@ conduit segment, clicking a conduit removes it. The level is won when the
 conduit 4-connects source to sink. Later levels add rock cells that reject
 placement, and a "ripple" mechanic where a click also deposits conduit on the
 four orthogonal neighbours (the clicked cell itself still toggles).
-A per-level click budget guards against blind flooding: exceeding it wipes
-the board clean (the level itself never ends, only progress resets).
+A per-level cap on concurrent conduit cells guards against blind flooding:
+exceeding it wipes the board clean (shown as a shrinking gauge bar; the
+level never ends, only progress resets).
 Colors: 0 bg, 8 board, 4 source, 6 sink, 11 conduit, 5 rock.
 """
 from __future__ import annotations
@@ -28,22 +29,21 @@ class Conduit(ArcEnv):
     uses_click = True
 
     _SPECS = {
-        # level: (source, sink, rocks, ripple, click budget)
+        # level: (source, sink, rocks, ripple, max concurrent conduit cells)
         1: ((5, 2), (5, 5), set(), False, 6),
         2: ((2, 2), (9, 9), set(), False, 17),
         3: ((2, 2), (9, 9), {(5, x) for x in range(1, 8)}, False, 17),
         4: ((5, 1), (5, 10), {(y, 5) for y in range(2, 10)}, False, 20),
-        5: ((2, 2), (9, 9), set(), True, 11),
-        6: ((9, 1), (2, 10), {(4, 4), (5, 5), (6, 6), (7, 7), (3, 8)}, True, 12),
+        5: ((2, 2), (9, 9), set(), True, 30),
+        6: ((9, 1), (2, 10), {(4, 4), (5, 5), (6, 6), (7, 7), (3, 8)}, True, 35),
     }
 
     def _load_level(self, level: int) -> None:
-        src, snk, rocks, ripple, budget = self._SPECS[level]
+        src, snk, rocks, ripple, max_cond = self._SPECS[level]
         self.src, self.snk = src, snk
         self.rocks = set(rocks) - {src, snk}
         self.ripple = ripple
-        self.budget = budget
-        self.clicks_used = 0
+        self.max_cond = max_cond
         self.cond = np.zeros((W, W), dtype=bool)
 
     def _cell_at(self, px, py):
@@ -60,11 +60,6 @@ class Conduit(ArcEnv):
         if c is None:
             return False
         cy, cx = c
-        self.clicks_used += 1
-        if self.clicks_used > self.budget:          # over budget: board wipes
-            self.cond[:] = False
-            self.clicks_used = 0
-            return False
         if not self._blocked(cy, cx):
             self.cond[cy, cx] = not self.cond[cy, cx]
         if self.ripple:
@@ -72,6 +67,9 @@ class Conduit(ArcEnv):
                 ny, nx = cy + dy, cx + dx
                 if 0 <= ny < W and 0 <= nx < W and not self._blocked(ny, nx):
                     self.cond[ny, nx] = True
+        if int(self.cond.sum()) > self.max_cond:    # flooded: board wipes
+            self.cond[:] = False
+            return False
         return self._connected()
 
     def _connected(self):
@@ -103,4 +101,7 @@ class Conduit(ArcEnv):
         ky, kx = self.snk
         rect(g, OFF + ky * CELL, OFF + kx * CELL, CELL, CELL, 6)
         border(g, 0, 0, 64, 64, 8)
+        rem = self.max_cond - int(self.cond.sum())          # capacity gauge
+        if rem > 0:
+            g[62, 2:2 + min(60, 2 * rem)] = 14
         return g
