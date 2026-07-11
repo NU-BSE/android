@@ -81,8 +81,9 @@ def test_sft_step_and_checkpoint_roundtrip(tmp_path):
     restored = SubmissionDRLQNSolver(drlqn_xs(), seed=9)
     metadata = load_solver_checkpoint(restored, path)
     assert metadata["source"] == "unit-test"
+    assert metadata["format"] == "drlqn-ordered-parameters-v1"
     left = solver.model.state_dict()
     right = restored.model.state_dict()
-    assert left.keys() == right.keys()
-    for name in left:
-        assert np.array_equal(left[name], right[name])
+    assert len(left) == len(right)
+    for actual, expected in zip(left, right):
+        assert np.array_equal(actual, expected)
