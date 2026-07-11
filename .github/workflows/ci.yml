@@ -26,6 +26,7 @@ jobs:
           - tests/test_spatial.py::test_hybrid_solver_smoke_on_local_environment
           - tests/test_top_route.py::test_extra_action_reuses_reserved_logits_without_becoming_click
           - tests/test_top_route.py::test_short_history_distinguishes_same_rendered_frame
+          - tests/test_top_route.py::test_bounded_history_revisits_state_after_window_saturates
           - tests/test_top_route.py::test_known_winning_edge_preempts_new_exploration
           - tests/test_top_route.py::test_arcade_adapter_uses_dynamic_available_actions_and_action7
           - tests/test_top_route.py::test_official_environment_tree_fits_fixed_action_mapping
