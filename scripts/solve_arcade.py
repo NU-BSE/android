@@ -1,4 +1,4 @@
-"""Run TopRouteDRLQNSolver through the ARC Prize ``arc_agi.Arcade`` API.
+"""Run SubmissionDRLQNSolver through the ARC Prize ``arc_agi.Arcade`` API.
 
 The same entry point works against the local 25-game environment directory and
 inside a competition rerun connected to the gateway. Competition wheels must be
@@ -12,7 +12,7 @@ from pathlib import Path
 
 from drlqn.config import drlqn_xs
 from drlqn.env.arcade_adapter import ArcadeEnvAdapter
-from drlqn.train.top_solver import TopRouteDRLQNSolver
+from drlqn.train.submission_solver import SubmissionDRLQNSolver
 
 
 def _parse_args() -> argparse.Namespace:
@@ -28,7 +28,7 @@ def _parse_args() -> argparse.Namespace:
 def solve_game(raw_env, game_id: str, game_action_cls, *, seed: int,
                max_actions_per_level: int, history_len: int) -> dict:
     env = ArcadeEnvAdapter(raw_env, game_id, game_action_cls)
-    solver = TopRouteDRLQNSolver(
+    solver = SubmissionDRLQNSolver(
         drlqn_xs(),
         seed=seed,
         history_len=history_len,
