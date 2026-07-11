@@ -1,26 +1,22 @@
 """The lambda library Lambda = {lambda_1..lambda_K}, K = 128.
 
   lambda_0..lambda_4         : key operators ACTION1..ACTION5
-  lambda_5..lambda_124       : CLICK(slot, offset) - 24 object slots x 5
-                               offsets. Offset 0 clicks the object centroid;
-                               offsets 1..4 click one object-size beside it
-                               (up/down/left/right) - the objectness prior
-                               "interact with a thing or right next to it".
+  lambda_5..lambda_124       : CLICK(slot, offset) - 24 spatial anchors x 5
+                                offsets. Anchors are state-conditioned proposals
+                                (objects, logical tiles, changed regions, and
+                                coarse lattice points), rather than objects only.
   lambda_125..lambda_127     : reserved (always masked invalid)
 
-Valid-action masking: key operators are valid iff the environment accepts
-the key; click operators iff the slot indexes an existing object.
-
-Each click lambda carries an *argument feature* vector: the target object's
-token features plus an offset one-hot (ARG_DIM). The Q-router adds these to
-the learned library embedding, giving state-conditioned, object-typed action
-embeddings (shared action geometry across compare-like operators).
+The fixed output geometry is retained for checkpoint/replay compatibility.  The
+proposal generator broadens ACTION6 coverage to empty cells and merged logical
+cells, closing the largest representational gap relative to tool-using agents.
 """
 from __future__ import annotations
 
 import numpy as np
 
 from ..env.core import ACTION1, ACTION2, ACTION3, ACTION4, ACTION5, CLICK
+from ..planning.spatial import ClickCandidate, candidate_token, generate_click_candidates
 from ..state import Obj, tokenize, TOKEN_DIM
 from .base import OperatorMeta
 
@@ -42,7 +38,7 @@ for lam in range(N_KEYS, K):
     METAS.append(OperatorMeta(lam, arity=1, branch_count=2, kind="click",
                               mutates_relations=True))
 
-META_FEATURES = np.stack([m.features() for m in METAS])       # (K, 8)
+META_FEATURES = np.stack([m.features() for m in METAS])
 
 
 def click_lambda(slot: int, offset: int) -> int:
@@ -54,42 +50,62 @@ def click_slot_offset(lam: int) -> tuple[int, int]:
     return r // N_OFFSETS, r % N_OFFSETS
 
 
-def valid_mask(env, objs: list[Obj]) -> np.ndarray:
+def spatial_anchors(grid: np.ndarray, objs: list[Obj],
+                    previous_grid: np.ndarray | None = None) -> list[ClickCandidate]:
+    return generate_click_candidates(grid, objs, N_SLOTS, previous_grid)
+
+
+def valid_mask(env, anchors) -> np.ndarray:
     mask = np.zeros(K, dtype=bool)
     for i, a in enumerate(_KEY_ACTIONS):
         mask[i] = a in env.action_space
     if env.uses_click:
-        n = min(len(objs), N_SLOTS)
+        n = min(len(anchors), N_SLOTS)
         for s in range(n):
-            mask[click_lambda(s, 0)] = True
-            if objs[s].area < 200:      # offset clicks: only beside small things
-                for o in range(1, N_OFFSETS):
-                    mask[click_lambda(s, o)] = True
+            for o in range(N_OFFSETS):
+                mask[click_lambda(s, o)] = True
     return mask
 
 
-def arg_features(objs: list[Obj]) -> np.ndarray:
-    """(K, ARG_DIM) object-argument features per lambda (zeros for keys)."""
+def _anchor_token(anchor, grid: np.ndarray | None = None) -> np.ndarray:
+    if isinstance(anchor, ClickCandidate):
+        if grid is None:
+            raise ValueError("grid is required to encode ClickCandidate anchors")
+        return candidate_token(anchor, grid)
+    # Backward-compatible object-only path for old tests/checkpoints.
+    return tokenize([anchor])[0]
+
+
+def arg_features(anchors, grid: np.ndarray | None = None) -> np.ndarray:
+    """(K, ARG_DIM) spatial-argument features per lambda."""
     F = np.zeros((K, ARG_DIM))
-    feats = tokenize(objs) if objs else np.zeros((0, TOKEN_DIM))
-    n = min(len(objs), N_SLOTS)
+    n = min(len(anchors), N_SLOTS)
     for s in range(n):
+        feat = _anchor_token(anchors[s], grid)
         for o in range(N_OFFSETS):
             lam = click_lambda(s, o)
-            F[lam, :TOKEN_DIM] = feats[s]
+            F[lam, :TOKEN_DIM] = feat
             F[lam, TOKEN_DIM + o] = 1.0
     return F
 
 
-def to_env_action(lam: int, objs: list[Obj]):
-    """Map a lambda to (action, x, y) for ArcEnv.step / the remote API."""
+def _anchor_xy_scale(anchor) -> tuple[float, float, int, int]:
+    if isinstance(anchor, ClickCandidate):
+        scale = max(1, int(anchor.scale))
+        return float(anchor.x), float(anchor.y), scale, scale
+    h = max(3, int(anchor.y1 - anchor.y0 + 1))
+    w = max(3, int(anchor.x1 - anchor.x0 + 1))
+    return float(anchor.cx), float(anchor.cy), w, h
+
+
+def to_env_action(lam: int, anchors):
+    """Map a lambda to (action, x, y) for ArcEnv.step / remote API."""
     if lam < N_KEYS:
         return _KEY_ACTIONS[lam], None, None
     slot, off = click_slot_offset(lam)
-    obj = objs[slot]
+    anchor = anchors[slot]
+    cx, cy, w, h = _anchor_xy_scale(anchor)
     dy, dx = _OFF[off]
-    h = max(3, obj.y1 - obj.y0 + 1)
-    w = max(3, obj.x1 - obj.x0 + 1)
-    x = int(np.clip(round(obj.cx + dx * w), 0, 63))
-    y = int(np.clip(round(obj.cy + dy * h), 0, 63))
+    x = int(np.clip(round(cx + dx * w), 0, 63))
+    y = int(np.clip(round(cy + dy * h), 0, 63))
     return CLICK, x, y
