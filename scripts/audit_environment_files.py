@@ -18,6 +18,7 @@ import re
 
 SUPPORTED = set(range(0, 10))
 ACTION_RE = re.compile(r"(?:GameAction\.)?ACTION(\d+)")
+_ACTION_FIELDS = {"available_actions", "action_space", "valid_actions"}
 
 
 @dataclass
@@ -31,37 +32,56 @@ class EnvironmentAudit:
     status: str
 
 
-def _literal_action_lists(tree: ast.AST) -> set[int]:
+def _literal_ints(node: ast.AST) -> set[int]:
+    if not isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        return set()
+    values: set[int] = set()
+    for element in node.elts:
+        if not isinstance(element, ast.Constant) or not isinstance(element.value, int):
+            return set()
+        values.add(int(element.value))
+    return values if all(0 <= value <= 20 for value in values) else set()
+
+
+def _declared_action_lists(tree: ast.AST) -> set[int]:
+    """Read only lists explicitly attached to action-space fields.
+
+    Environment files contain many short integer color/shape lists; scanning all
+    list literals produces false ACTION7 reports. Calls such as
+    ``super().__init__(available_actions=[...])`` and direct assignments are the
+    reliable numeric declarations.
+    """
     ids: set[int] = set()
     for node in ast.walk(tree):
-        if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
-            values: list[int] = []
-            ok = True
-            for elt in node.elts:
-                if isinstance(elt, ast.Constant) and isinstance(elt.value, int):
-                    values.append(int(elt.value))
-                else:
-                    ok = False
-                    break
-            if ok and values and all(0 <= value <= 20 for value in values):
-                # Action declarations contain a short subset of engine ids.
-                if any(1 <= value <= 9 for value in values) and len(values) <= 12:
-                    ids.update(values)
+        if isinstance(node, ast.Call):
+            for keyword in node.keywords:
+                if keyword.arg in _ACTION_FIELDS:
+                    ids.update(_literal_ints(keyword.value))
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            value = node.value
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            names = {
+                target.id
+                for target in targets
+                if isinstance(target, ast.Name)
+            }
+            names.update(
+                target.attr
+                for target in targets
+                if isinstance(target, ast.Attribute)
+            )
+            if names & _ACTION_FIELDS:
+                ids.update(_literal_ints(value))
     return ids
 
 
 def audit_file(path: Path) -> EnvironmentAudit:
     text = path.read_text(encoding="utf-8", errors="replace")
-    explicit = {int(match.group(1)) for match in ACTION_RE.finditer(text)}
-    action_ids = set(explicit)
+    action_ids = {int(match.group(1)) for match in ACTION_RE.finditer(text)}
     try:
-        action_ids.update(_literal_action_lists(ast.parse(text)))
+        action_ids.update(_declared_action_lists(ast.parse(text)))
     except SyntaxError:
         pass
-    # Remove common non-action constants accidentally captured by literal-list
-    # scanning unless they also appeared as explicit ACTIONn names.
-    if explicit:
-        action_ids = {value for value in action_ids if value in explicit or value <= 9}
     unsupported = sorted(action_ids - SUPPORTED)
     uses_click = 6 in action_ids or "ACTION6" in text
     uses_extra_key = any(value >= 7 for value in action_ids)
