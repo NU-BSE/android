@@ -1,20 +1,15 @@
 """State-conditioned spatial action proposals.
 
 The original DRLQN action library attached ACTION6 only to connected-object
-centroids and four object-sized offsets.  That is a useful prior, but it cannot
-represent many ARC-AGI-3 mechanics where the correct click is an empty cell, a
-cell inside a merged region, or a location on an inferred board lattice.
-
-This module keeps the fixed 24 x 5 click geometry while making the 24 anchors
-dynamic.  Anchors combine object locations, inferred tile-cell centres,
-changed regions, and boundary-adjacent empty locations.  The Q-router still
-selects one of 128 lambda actions, so no large output-head or replay-format
-change is required.
+centroids and four object-sized offsets. This module keeps the fixed 24 x 5
+click geometry while making the 24 anchors state-conditioned.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+from math import gcd
+from functools import reduce
 from typing import Iterable
 
 import numpy as np
@@ -26,8 +21,6 @@ GRID = 64
 
 @dataclass(frozen=True)
 class ClickCandidate:
-    """One spatial anchor used by the five click-offset operators."""
-
     x: int
     y: int
     kind: str
@@ -55,21 +48,18 @@ def _run_lengths(line: np.ndarray) -> list[int]:
 
 
 def infer_tile_scale(grid: np.ndarray) -> int:
-    """Infer a likely rendered cell size from repeated color-run lengths.
+    """Infer the fundamental rendered-cell period of a 64x64 frame.
 
-    ARC environments frequently render an 8x8 or 16x16 logical board onto the
-    64x64 observation.  Adjacent equal-color cells merge into one connected
-    component, so connected-component centroids alone lose the individual
-    clickable cells.  A robust divisor vote over horizontal and vertical runs
-    recovers common scales such as 2, 4, 8, and 16.
+    A board with 8-pixel logical cells also contains 16/24/32-pixel color runs
+    whenever adjacent cells share a color. Choosing the largest supported
+    divisor therefore over-coarsens the action lattice. We first take the GCD
+    of frequent run lengths, then fall back to a robust support vote when HUD
+    artifacts break the exact period.
     """
-
     g = np.asarray(grid)
     if g.shape != (GRID, GRID):
         return 1
     lengths: list[int] = []
-    # Sampling every row/column is cheap at 64x64 and is more robust to HUDs
-    # than relying on one scanline.
     for row in g:
         lengths.extend(_run_lengths(row))
     for col in g.T:
@@ -78,11 +68,17 @@ def infer_tile_scale(grid: np.ndarray) -> int:
     if len(useful) < 8:
         return 1
 
+    # Ignore very rare run lengths (typically animation/HUD artifacts) before
+    # recovering the fundamental period.
+    counts = {n: useful.count(n) for n in set(useful)}
+    frequent = [n for n in useful if counts[n] >= 4]
+    period = reduce(gcd, frequent) if frequent else 1
+    if period in (2, 4, 8, 16):
+        return period
     for scale in (16, 8, 4, 2):
         divisible = sum(1 for n in useful if n % scale == 0)
-        exactish = sum(1 for n in useful if n in (scale, 2 * scale, 3 * scale, 4 * scale))
-        support = divisible / len(useful)
-        if divisible >= 8 and exactish >= 4 and support >= 0.62:
+        exact = sum(1 for n in useful if n == scale)
+        if divisible >= 8 and exact >= 4 and divisible / len(useful) >= 0.72:
             return scale
     return 1
 
@@ -122,12 +118,14 @@ def _changed_centres(previous_grid: np.ndarray | None, grid: np.ndarray) -> list
                 cells.append((cy, cx))
                 for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
                     yy, xx = cy + dy, cx + dx
-                    if 0 <= yy < GRID and 0 <= xx < GRID and changed[yy, xx] and not seen[yy, xx]:
+                    if (0 <= yy < GRID and 0 <= xx < GRID and changed[yy, xx]
+                            and not seen[yy, xx]):
                         seen[yy, xx] = True
                         stack.append((yy, xx))
             ys = [p[0] for p in cells]
             xs = [p[1] for p in cells]
-            centres.append((int(round(sum(ys) / len(ys))), int(round(sum(xs) / len(xs)))))
+            centres.append((int(round(sum(ys) / len(ys))),
+                            int(round(sum(xs) / len(xs)))))
     return centres
 
 
@@ -138,9 +136,8 @@ def _object_candidates(objs: Iterable, counts: np.ndarray) -> list[ClickCandidat
         w = int(obj.x1 - obj.x0 + 1)
         scale = max(1, min(h, w))
         base = 4.0 + _rarity(counts, int(obj.color)) + 1.0 / max(1.0, math.sqrt(float(obj.area)))
-        out.append(ClickCandidate(int(round(obj.cx)), int(round(obj.cy)), "object", int(obj.color), scale, base))
-        # Empty-cell and boundary interactions are common (bridges, mirrors,
-        # path extension).  Seed anchors immediately outside each object.
+        out.append(ClickCandidate(int(round(obj.cx)), int(round(obj.cy)),
+                                  "object", int(obj.color), scale, base))
         pad = max(1, min(8, scale))
         neighbours = (
             (int(round(obj.cx)), int(obj.y0) - pad),
@@ -160,13 +157,7 @@ def generate_click_candidates(
     max_candidates: int = 24,
     previous_grid: np.ndarray | None = None,
 ) -> list[ClickCandidate]:
-    """Generate a compact, diverse set of spatial click anchors.
-
-    The ranking is intentionally heuristic and teacher-friendly: demonstrations
-    can train the Q-router to choose among the proposals, while the proposal
-    generator guarantees that common non-object coordinates are representable.
-    """
-
+    """Generate a compact, diverse set of spatial click anchors."""
     g = np.asarray(grid, dtype=np.uint8)
     if g.shape != (GRID, GRID):
         raise ValueError(f"expected a 64x64 grid, got {g.shape}")
@@ -193,8 +184,6 @@ def generate_click_candidates(
                 color = int(g[y, x])
                 boundary = _boundary_density(g, y, x, scale)
                 rarity = _rarity(counts, color)
-                # Border strips are often timers/HUDs; retain them, but rank
-                # interior puzzle cells first unless they are very distinctive.
                 border_penalty = 1.2 if min(x, y, GRID - 1 - x, GRID - 1 - y) < scale else 0.0
                 score = 1.5 + 1.8 * rarity + 1.4 * boundary - border_penalty
                 add(ClickCandidate(x, y, "tile", color, scale, score))
@@ -202,8 +191,6 @@ def generate_click_candidates(
     for y, x in _changed_centres(previous_grid, g):
         add(ClickCandidate(x, y, "changed", int(g[y, x]), max(1, scale), 12.0))
 
-    # A coarse fallback lattice guarantees arbitrary-coordinate reachability
-    # even when no clean rendered cell scale can be inferred.
     fallback_step = 8 if scale == 1 else max(4, 2 * scale)
     for y in range(fallback_step // 2, GRID, fallback_step):
         for x in range(fallback_step // 2, GRID, fallback_step):
@@ -213,8 +200,6 @@ def generate_click_candidates(
     ranked = sorted(pool.values(), key=lambda c: (-c.score, c.y, c.x, c.kind))
     selected: list[ClickCandidate] = []
     for candidate in ranked:
-        # Keep distinct neighbouring logical cells; only suppress near-duplicate
-        # proposals that land in essentially the same pixel neighbourhood.
         duplicate = False
         for prior in selected:
             radius = max(1, min(candidate.scale, prior.scale) // 3)
@@ -230,7 +215,6 @@ def generate_click_candidates(
 
 def candidate_token(candidate: ClickCandidate, grid: np.ndarray) -> np.ndarray:
     """Encode a spatial anchor in the same 33-D object-token geometry."""
-
     g = np.asarray(grid)
     y, x = int(candidate.y), int(candidate.x)
     color = int(g[y, x])
@@ -246,8 +230,6 @@ def candidate_token(candidate: ClickCandidate, grid: np.ndarray) -> np.ndarray:
     f[21] = 1.0
     f[22] = 0.25
     f[23] = _boundary_density(g, y, x, max(1, scale // 2))
-
-    # Orientation-sensitive 3x3 local signature, analogous to Obj.shape3.
     for gy, dy in enumerate((-scale, 0, scale)):
         for gx, dx in enumerate((-scale, 0, scale)):
             yy = int(np.clip(y + dy, 0, GRID - 1))
