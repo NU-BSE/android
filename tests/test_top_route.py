@@ -17,7 +17,7 @@ from drlqn.operators.library import (
 )
 from drlqn.state import Obj
 from drlqn.train.distill import match_teacher_action
-from drlqn.train.top_solver import TopRouteDRLQNSolver
+from drlqn.train.submission_solver import SubmissionDRLQNSolver
 from scripts.audit_environment_files import audit_tree
 
 
@@ -57,7 +57,7 @@ def test_extra_action_reuses_reserved_logits_without_becoming_click():
 
 def test_short_history_distinguishes_same_rendered_frame():
     env = StubEnv()
-    solver = TopRouteDRLQNSolver(drlqn_xs(), seed=0)
+    solver = SubmissionDRLQNSolver(drlqn_xs(), seed=0)
     grid = np.zeros((64, 64), dtype=np.uint8)
     grid[20:23, 20:23] = 8
 
@@ -74,9 +74,25 @@ def test_short_history_distinguishes_same_rendered_frame():
     assert len(second.tokens) == 64
 
 
+def test_bounded_history_revisits_state_after_window_saturates():
+    env = StubEnv()
+    solver = SubmissionDRLQNSolver(drlqn_xs(), seed=0, history_len=2)
+    grid = np.zeros((64, 64), dtype=np.uint8)
+    solver.perceive(env, grid)
+
+    keys = []
+    for count in range(1, 4):
+        solver._pending_lambda = 0
+        env.action_count = count
+        keys.append(solver.perceive(env, grid).key)
+
+    assert keys[-1] == keys[-2]
+    assert solver._steps_in_level == 3
+
+
 def test_known_winning_edge_preempts_new_exploration():
     env = StubEnv()
-    solver = TopRouteDRLQNSolver(drlqn_xs(), seed=1)
+    solver = SubmissionDRLQNSolver(drlqn_xs(), seed=1)
     grid = np.zeros((64, 64), dtype=np.uint8)
     grid[30:34, 30:34] = 11
     node = solver.perceive(env, grid)
