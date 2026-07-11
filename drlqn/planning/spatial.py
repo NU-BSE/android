@@ -7,9 +7,9 @@ click geometry while making the 24 anchors state-conditioned.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import reduce
 import math
 from math import gcd
-from functools import reduce
 from typing import Iterable
 
 import numpy as np
@@ -48,14 +48,7 @@ def _run_lengths(line: np.ndarray) -> list[int]:
 
 
 def infer_tile_scale(grid: np.ndarray) -> int:
-    """Infer the fundamental rendered-cell period of a 64x64 frame.
-
-    A board with 8-pixel logical cells also contains 16/24/32-pixel color runs
-    whenever adjacent cells share a color. Choosing the largest supported
-    divisor therefore over-coarsens the action lattice. We first take the GCD
-    of frequent run lengths, then fall back to a robust support vote when HUD
-    artifacts break the exact period.
-    """
+    """Infer the fundamental rendered-cell period of a 64x64 frame."""
     g = np.asarray(grid)
     if g.shape != (GRID, GRID):
         return 1
@@ -67,9 +60,6 @@ def infer_tile_scale(grid: np.ndarray) -> int:
     useful = [n for n in lengths if 1 < n <= 32]
     if len(useful) < 8:
         return 1
-
-    # Ignore very rare run lengths (typically animation/HUD artifacts) before
-    # recovering the fundamental period.
     counts = {n: useful.count(n) for n in set(useful)}
     frequent = [n for n in useful if counts[n] >= 4]
     period = reduce(gcd, frequent) if frequent else 1
@@ -188,14 +178,20 @@ def generate_click_candidates(
                 score = 1.5 + 1.8 * rarity + 1.4 * boundary - border_penalty
                 add(ClickCandidate(x, y, "tile", color, scale, score))
 
+    # Transition evidence is more informative than static visual rarity.
     for y, x in _changed_centres(previous_grid, g):
-        add(ClickCandidate(x, y, "changed", int(g[y, x]), max(1, scale), 12.0))
+        add(ClickCandidate(x, y, "changed", int(g[y, x]), max(1, scale), 100.0))
 
-    fallback_step = 8 if scale == 1 else max(4, 2 * scale)
+    # Always include an 8-pixel lattice. It represents individual cells when a
+    # frame alone is ambiguous between one 16-pixel tile and four merged 8-pixel
+    # tiles, and also supplies empty-cell actions for construction games.
+    fallback_step = 8
     for y in range(fallback_step // 2, GRID, fallback_step):
         for x in range(fallback_step // 2, GRID, fallback_step):
-            score = 0.5 + _boundary_density(g, y, x, max(1, fallback_step // 2))
-            add(ClickCandidate(x, y, "lattice", int(g[y, x]), fallback_step, score))
+            color = int(g[y, x])
+            score = (0.5 + 1.6 * _rarity(counts, color)
+                     + _boundary_density(g, y, x, fallback_step // 2))
+            add(ClickCandidate(x, y, "lattice", color, fallback_step, score))
 
     ranked = sorted(pool.values(), key=lambda c: (-c.score, c.y, c.x, c.kind))
     selected: list[ClickCandidate] = []
