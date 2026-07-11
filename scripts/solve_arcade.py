@@ -12,6 +12,7 @@ from pathlib import Path
 
 from drlqn.config import drlqn_xs
 from drlqn.env.arcade_adapter import ArcadeEnvAdapter
+from drlqn.train.checkpoint import load_solver_checkpoint
 from drlqn.train.submission_solver import SubmissionDRLQNSolver
 
 
@@ -21,18 +22,23 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max-actions-per-level", type=int, default=600)
     parser.add_argument("--history-len", type=int, default=4)
+    parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--output", type=Path, default=Path("results/arcade_results.json"))
     return parser.parse_args()
 
 
 def solve_game(raw_env, game_id: str, game_action_cls, *, seed: int,
-               max_actions_per_level: int, history_len: int) -> dict:
+               max_actions_per_level: int, history_len: int,
+               checkpoint: Path | None = None) -> dict:
     env = ArcadeEnvAdapter(raw_env, game_id, game_action_cls)
     solver = SubmissionDRLQNSolver(
         drlqn_xs(),
         seed=seed,
         history_len=history_len,
     )
+    checkpoint_metadata = {}
+    if checkpoint is not None:
+        checkpoint_metadata = load_solver_checkpoint(solver, checkpoint)
     budgets = {level: int(max_actions_per_level) for level in range(1, 129)}
     result = solver.run_env(env, budgets)
     return {
@@ -44,6 +50,8 @@ def solve_game(raw_env, game_id: str, game_action_cls, *, seed: int,
         "updates": result.updates,
         "wall_clock_s": result.wall_clock_s,
         "telemetry": result.telemetry,
+        "checkpoint": str(checkpoint) if checkpoint is not None else None,
+        "checkpoint_metadata": checkpoint_metadata,
     }
 
 
@@ -56,6 +64,9 @@ def main() -> None:
         raise SystemExit(
             "Install the ARC-AGI-3 competition wheels before running this entry point"
         ) from exc
+
+    if args.checkpoint is not None and not args.checkpoint.exists():
+        raise SystemExit(f"checkpoint does not exist: {args.checkpoint}")
 
     arcade = arc_agi.Arcade()
     selected = set(args.game)
@@ -73,6 +84,7 @@ def main() -> None:
             seed=args.seed + index,
             max_actions_per_level=args.max_actions_per_level,
             history_len=args.history_len,
+            checkpoint=args.checkpoint,
         )
         rows.append(row)
         print(json.dumps(row, sort_keys=True))
