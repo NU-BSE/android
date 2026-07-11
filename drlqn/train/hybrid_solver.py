@@ -10,8 +10,13 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from ..operators.library import arg_features, spatial_anchors, valid_mask
-from ..state import Obj, TOKEN_DIM, tokenize
+from ..operators.library import (
+    arg_features,
+    is_click_lambda,
+    spatial_anchors,
+    valid_mask,
+)
+from ..state import TOKEN_DIM
 from .trainer import DRLQNSolver, NodeInfo
 
 
@@ -35,17 +40,17 @@ class SpatialAnchor:
 
 
 def _as_obj(candidate, grid: np.ndarray) -> SpatialAnchor:
-    s = max(1, int(candidate.scale))
-    half = max(0, s // 2)
+    scale = max(1, int(candidate.scale))
+    half = max(0, scale // 2)
     x0, x1 = max(0, candidate.x - half), min(63, candidate.x + half)
     y0, y1 = max(0, candidate.y - half), min(63, candidate.y + half)
     color = int(grid[candidate.y, candidate.x])
     shape = np.zeros((3, 3), dtype=np.float64)
-    for gy, dy in enumerate((-s, 0, s)):
-        for gx, dx in enumerate((-s, 0, s)):
-            yy = int(np.clip(candidate.y + dy, 0, 63))
-            xx = int(np.clip(candidate.x + dx, 0, 63))
-            shape[gy, gx] = float(int(grid[yy, xx]) == color)
+    for grid_y, delta_y in enumerate((-scale, 0, scale)):
+        for grid_x, delta_x in enumerate((-scale, 0, scale)):
+            y = int(np.clip(candidate.y + delta_y, 0, 63))
+            x = int(np.clip(candidate.x + delta_x, 0, 63))
+            shape[grid_y, grid_x] = float(int(grid[y, x]) == color)
     return SpatialAnchor(
         color=color,
         y0=y0,
@@ -77,24 +82,27 @@ class HybridDRLQNSolver(DRLQNSolver):
 
     def perceive(self, env, grid) -> NodeInfo:
         node = super().perceive(env, grid)
-        # A cached node already has the hybrid representation.
+        # A cached node already has the hybrid representation. Refresh the
+        # transition anchor even on revisits so the next changed-region proposal
+        # compares against the actual immediately preceding frame.
         if getattr(node, "hybrid_spatial", False):
+            self._previous_grid = np.asarray(grid).copy()
             return node
 
         proposals = spatial_anchors(grid, node.objs, self._previous_grid)
-        anchors = [_as_obj(p, grid) for p in proposals]
+        anchors = [_as_obj(proposal, grid) for proposal in proposals]
         if anchors:
             node.objs = anchors
             node.lam_feats = arg_features(anchors)
             node.valid = valid_mask(env, anchors)
         node.hybrid_spatial = True
-        node.proposal_kinds = [p.kind for p in proposals]
+        node.proposal_kinds = [proposal.kind for proposal in proposals]
         self._previous_grid = np.asarray(grid).copy()
         return node
 
     def _prior_bonus(self, node: NodeInfo, lam: int) -> float:
         bonus = super()._prior_bonus(node, lam)
-        if lam >= 5:
+        if is_click_lambda(lam):
             slot = (lam - 5) // 5
             if slot < len(node.objs):
                 anchor = node.objs[slot]

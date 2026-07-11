@@ -5,7 +5,13 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from ..operators.library import N_KEYS, N_OFFSETS, click_lambda, to_env_action
+from ..operators.library import (
+    N_OFFSETS,
+    N_SLOTS,
+    click_lambda,
+    lambda_for_action,
+    to_env_action,
+)
 
 
 @dataclass(frozen=True)
@@ -19,20 +25,27 @@ def match_teacher_action(action: int, anchors, x: int | None = None,
                          y: int | None = None) -> TeacherActionMatch:
     """Map a teacher primitive/coordinate action to the closest lambda action.
 
-    Key actions map exactly. ACTION6 coordinates are matched against all five
-    offsets of every active spatial anchor. The returned distance can be used as
-    a sample weight or to reject demonstrations outside proposal coverage.
+    ACTION1..ACTION5 and ACTION7..ACTION9 map exactly. ACTION6 coordinates are
+    matched against all five offsets of every active spatial anchor. The
+    returned distance can be used as a sample weight or to reject
+    demonstrations outside proposal coverage.
     """
-    if 1 <= int(action) <= N_KEYS:
-        return TeacherActionMatch(int(action) - 1, 0.0, True)
-    if int(action) != 6 or x is None or y is None:
-        raise ValueError("teacher action must be ACTION1..ACTION6; clicks need x and y")
+    action = int(action)
+    if action != 6:
+        try:
+            return TeacherActionMatch(lambda_for_action(action), 0.0, True)
+        except ValueError as exc:
+            raise ValueError(
+                "teacher action must be ACTION1..ACTION9; ACTION6 needs x and y"
+            ) from exc
+    if x is None or y is None:
+        raise ValueError("ACTION6 demonstrations require x and y")
     if not anchors:
         raise ValueError("cannot map a click without spatial anchors")
 
     best_lam = -1
     best_distance = float("inf")
-    for slot in range(min(24, len(anchors))):
+    for slot in range(min(N_SLOTS, len(anchors))):
         for offset in range(N_OFFSETS):
             lam = click_lambda(slot, offset)
             _, px, py = to_env_action(lam, anchors)

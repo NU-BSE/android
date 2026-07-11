@@ -4,7 +4,8 @@ on:
   pull_request:
   push:
     branches:
-      - codex/hybrid-spatial-distillation
+      - main
+      - codex/**
 
 jobs:
   test:
@@ -19,10 +20,18 @@ jobs:
           - tests/test_jvp.py
           - tests/test_scale.py
           - tests/test_distill.py
+          - tests/test_duck_sft.py
+          - tests/test_submission_run.py
           - tests/test_spatial.py::test_infers_rendered_tile_scale
           - tests/test_spatial.py::test_proposals_cover_individual_cells_inside_merged_region
           - tests/test_spatial.py::test_changed_region_gets_high_priority_anchor
           - tests/test_spatial.py::test_hybrid_solver_smoke_on_local_environment
+          - tests/test_top_route.py::test_extra_action_reuses_reserved_logits_without_becoming_click
+          - tests/test_top_route.py::test_short_history_distinguishes_same_rendered_frame
+          - tests/test_top_route.py::test_bounded_history_revisits_state_after_window_saturates
+          - tests/test_top_route.py::test_known_winning_edge_preempts_new_exploration
+          - tests/test_top_route.py::test_arcade_adapter_uses_dynamic_available_actions_and_action7
+          - tests/test_top_route.py::test_official_environment_tree_fits_fixed_action_mapping
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -34,3 +43,31 @@ jobs:
         env:
           PYTHONPATH: .
         run: pytest -vv ${{ matrix.test_target }}
+
+  official-environment-runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install official engine dependency
+        run: python -m pip install --upgrade pip numpy pytest arcengine==0.9.3
+      - name: Execute all 25 environments through the submission adapter
+        env:
+          PYTHONPATH: .
+        run: pytest -vv tests/test_official_env_runtime.py
+      - name: Run four-action-per-level official smoke benchmark
+        env:
+          PYTHONPATH: .
+        run: >-
+          python scripts/benchmark_official.py
+          --max-actions-per-level 4
+          --max-levels 8
+          --output results/official_smoke.json
+      - name: Upload official smoke results
+        uses: actions/upload-artifact@v4
+        with:
+          name: official-smoke-results
+          path: results/official_smoke.json
