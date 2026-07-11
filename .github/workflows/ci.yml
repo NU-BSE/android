@@ -58,3 +58,16 @@ jobs:
         env:
           PYTHONPATH: .
         run: pytest -vv tests/test_official_env_runtime.py
+      - name: Run four-action-per-level official smoke benchmark
+        env:
+          PYTHONPATH: .
+        run: >-
+          python scripts/benchmark_official.py
+          --max-actions-per-level 4
+          --max-levels 8
+          --output results/official_smoke.json
+      - name: Upload official smoke results
+        uses: actions/upload-artifact@v4
+        with:
+          name: official-smoke-results
+          path: results/official_smoke.json
