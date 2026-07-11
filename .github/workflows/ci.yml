@@ -20,6 +20,7 @@ jobs:
           - tests/test_jvp.py
           - tests/test_scale.py
           - tests/test_distill.py
+          - tests/test_duck_sft.py
           - tests/test_spatial.py::test_infers_rendered_tile_scale
           - tests/test_spatial.py::test_proposals_cover_individual_cells_inside_merged_region
           - tests/test_spatial.py::test_changed_region_gets_high_priority_anchor
