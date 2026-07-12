@@ -1,0 +1,2 @@
+-r requirements-optuna.txt
+pytest>=8,<10
