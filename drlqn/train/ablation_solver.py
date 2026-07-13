@@ -44,6 +44,15 @@ class AblationSubmissionDRLQNSolver(SubmissionDRLQNSolver):
             self.sched.approx_at = 10**12
 
     def select(self, node, actions_taken: int) -> int | None:
+        # A verified level-advance edge is stronger evidence than any soft
+        # specialist mixture and must retain the production solver's priority.
+        winning = self.winning_actions.get(node.key)
+        if winning is not None and node.valid[int(winning)]:
+            selected = int(winning)
+            self.route_counts["known_win"] += 1
+            self._pending_lambda = selected
+            return selected
+
         if self.planner_portfolio_enabled:
             selected = self.planner_portfolio.select(self, node)
             if selected is not None:
