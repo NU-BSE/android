@@ -22,6 +22,7 @@ jobs:
           - tests/test_distill.py
           - tests/test_duck_sft.py
           - tests/test_duck_dense_replay.py
+          - tests/test_arc_dataset_client.py
           - tests/test_drlqn_ablation_solver.py
           - tests/test_planner_portfolio.py
           - tests/test_offline_experience.py
@@ -60,10 +61,12 @@ jobs:
       - name: Compile new training and submission entry points
         run: >-
           python -m py_compile
+          drlqn/data/arc_dataset.py
           drlqn/planning/portfolio.py
           drlqn/train/offline_experience.py
           drlqn/train/curriculum.py
           drlqn/accelerator/models.py
+          scripts/replay_duck_trajectories.py
           scripts/generate_offline_experience.py
           scripts/train_curriculum.py
           scripts/train_accelerated_students.py
