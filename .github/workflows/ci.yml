@@ -21,6 +21,8 @@ jobs:
           - tests/test_scale.py
           - tests/test_distill.py
           - tests/test_duck_sft.py
+          - tests/test_duck_dense_replay.py
+          - tests/test_drlqn_ablation_solver.py
           - tests/test_submission_run.py
           - tests/test_spatial.py::test_infers_rendered_tile_scale
           - tests/test_spatial.py::test_proposals_cover_individual_cells_inside_merged_region

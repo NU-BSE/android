@@ -25,12 +25,20 @@ export class ArcDatasetApi {
     return headers;
   }
 
+  private url(path: string): URL {
+    // Preserve reverse-proxy prefixes such as /agi-3. A leading slash passed to
+    // new URL(path, baseUrl) would otherwise resolve against the site root.
+    const base = this.baseUrl.replace(/\/+$/, "");
+    const suffix = path.replace(/^\/+/, "");
+    return new URL(`${base}/${suffix}`);
+  }
+
   async listRecordings(gameCode?: string): Promise<Recording[]> {
     const all: Recording[] = [];
     let offset = 0;
 
     while (true) {
-      const url = new URL("/v1/recordings", this.baseUrl);
+      const url = this.url("v1/recordings");
       url.searchParams.set("limit", "500");
       url.searchParams.set("offset", String(offset));
       if (gameCode) url.searchParams.set("game_code", gameCode);
@@ -44,10 +52,16 @@ export class ArcDatasetApi {
     }
   }
 
+  async getRecording(recordingId: string): Promise<Recording> {
+    const url = this.url(`v1/recordings/${encodeURIComponent(recordingId)}`);
+    const response = await fetch(url, { headers: this.headers() });
+    if (!response.ok) throw new Error(`Recording request returned ${response.status}`);
+    return (await response.json()) as Recording;
+  }
+
   async *streamRecording(recordingId: string): AsyncGenerator<unknown> {
-    const url = new URL(
-      `/v1/recordings/${encodeURIComponent(recordingId)}/download`,
-      this.baseUrl,
+    const url = this.url(
+      `v1/recordings/${encodeURIComponent(recordingId)}/download`,
     );
     const response = await fetch(url, { headers: this.headers() });
     if (!response.ok || !response.body) {
@@ -74,9 +88,8 @@ export class ArcDatasetApi {
   }
 
   async signedDownloadUrl(recordingId: string): Promise<string> {
-    const url = new URL(
-      `/v1/recordings/${encodeURIComponent(recordingId)}/signed-url`,
-      this.baseUrl,
+    const url = this.url(
+      `v1/recordings/${encodeURIComponent(recordingId)}/signed-url`,
     );
     const response = await fetch(url, { headers: this.headers() });
     if (!response.ok) throw new Error(`Signed URL request returned ${response.status}`);
