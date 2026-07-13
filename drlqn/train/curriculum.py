@@ -50,9 +50,10 @@ class EnvironmentTransitionTrainer:
         frame_change_coef: float = 0.6,
         level_advance_coef: float = 0.8,
         next_embedding_coef: float = 0.5,
+        heads: AuxiliaryHeads | None = None,
     ) -> None:
         self.solver = solver
-        self.heads = AuxiliaryHeads(solver.cfg, np.random.default_rng(seed + 311))
+        self.heads = heads or AuxiliaryHeads(solver.cfg, np.random.default_rng(seed + 311))
         self.opt = Adam([*solver.model.parameters(), *self.heads.parameters()], lr=lr)
         self.frame_change_coef = float(frame_change_coef)
         self.level_advance_coef = float(level_advance_coef)
