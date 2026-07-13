@@ -6,12 +6,13 @@ from collections import deque
 import numpy as np
 
 from ..autodiff import T
+from ..planning.portfolio import PlannerPortfolio
 from .losses import double_dqn_targets, q_loss
 from .submission_solver import SubmissionDRLQNSolver
 
 
 class AblationSubmissionDRLQNSolver(SubmissionDRLQNSolver):
-    """Expose history, graph-planning and differential-complexity switches.
+    """Expose history, graph, planner-portfolio and differential switches.
 
     The production solver remains unchanged. When differential complexity is
     disabled, online learning uses only the Double-DQN router loss and never
@@ -24,6 +25,7 @@ class AblationSubmissionDRLQNSolver(SubmissionDRLQNSolver):
         history_enabled: bool = True,
         history_len: int = 4,
         graph_planning: bool = True,
+        planner_portfolio: bool = False,
         differential_complexity: bool = True,
         **kwargs,
     ) -> None:
@@ -33,12 +35,22 @@ class AblationSubmissionDRLQNSolver(SubmissionDRLQNSolver):
         self.history_len = max(0, requested_history)
         self._recent_effects = deque(maxlen=self.history_len)
         self.graph_planning = bool(graph_planning)
+        self.planner_portfolio_enabled = bool(planner_portfolio)
+        self.planner_portfolio = PlannerPortfolio()
+        self.route_counts.setdefault("portfolio", 0)
         self.differential_complexity = bool(differential_complexity)
         if not self.differential_complexity:
             self.sched.diff_losses_at = 10**12
             self.sched.approx_at = 10**12
 
     def select(self, node, actions_taken: int) -> int | None:
+        if self.planner_portfolio_enabled:
+            selected = self.planner_portfolio.select(self, node)
+            if selected is not None:
+                self.route_counts["portfolio"] += 1
+                self._pending_lambda = int(selected)
+                return int(selected)
+
         if self.graph_planning:
             return super().select(node, actions_taken)
 
@@ -123,6 +135,9 @@ class AblationSubmissionDRLQNSolver(SubmissionDRLQNSolver):
             "history": self.history_enabled,
             "history_len": self.history_len,
             "graph_planning": self.graph_planning,
+            "planner_portfolio": self.planner_portfolio_enabled,
             "differential_complexity": self.differential_complexity,
         }
+        if self.planner_portfolio_enabled:
+            result.telemetry["planner_portfolio"] = self.planner_portfolio.telemetry()
         return result
