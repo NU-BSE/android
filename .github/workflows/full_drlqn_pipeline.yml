@@ -54,6 +54,14 @@ jobs:
           --base-url https://hse.onl/agi-3
           --output data/duck_dense_transitions.npz
           --report results/duck_replay_report.json
+      - name: Upload Duck replay diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: duck-replay-diagnostics
+          retention-days: 14
+          if-no-files-found: warn
+          path: results/duck_replay_report.json
       - name: Generate all-environment offline experience
         run: >-
           python scripts/generate_offline_experience.py
