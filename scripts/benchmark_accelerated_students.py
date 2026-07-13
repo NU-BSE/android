@@ -67,7 +67,8 @@ def _load_model(torch, checkpoint: Path, device):
     payload = torch.load(checkpoint, map_location=device)
     config = dict(payload.get("config") or {})
     name = str(config.get("name") or checkpoint.stem)
-    model = build_accelerator_model(name, **config).to(device)
+    overrides = {key: value for key, value in config.items() if key != "name"}
+    model = build_accelerator_model(name, **overrides).to(device)
     model.load_state_dict(payload["model"])
     model.eval()
     return model, config
