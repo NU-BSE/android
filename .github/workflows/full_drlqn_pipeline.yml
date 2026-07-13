@@ -1,0 +1,148 @@
+name: Full DRLQN Training and Matrix
+
+on:
+  workflow_dispatch:
+    inputs:
+      generated_actions_per_level:
+        description: Offline generation budget per level
+        required: true
+        default: '300'
+      duck_epochs:
+        description: Duck SFT epochs
+        required: true
+        default: '10'
+      world_epochs:
+        description: Environment world-model epochs
+        required: true
+        default: '8'
+      planner_epochs:
+        description: Planner/value distillation epochs
+        required: true
+        default: '8'
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      PYTHONPATH: .
+      ARC_DATASET_API_KEY: ${{ secrets.ARC_DATASET_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Require hosted dataset secret
+        run: test -n "$ARC_DATASET_API_KEY" || (echo 'Set repository secret ARC_DATASET_API_KEY' && exit 2)
+      - name: Install runtime dependencies
+        run: python -m pip install --upgrade pip numpy requests pytest arcengine==0.9.3
+      - name: Reconstruct every hosted Duck recording
+        run: >-
+          python scripts/replay_duck_trajectories.py
+          --base-url https://hse.onl/agi-3
+          --output data/duck_dense_transitions.npz
+          --report results/duck_replay_report.json
+      - name: Generate all-environment offline experience
+        run: >-
+          python scripts/generate_offline_experience.py
+          --max-actions-per-level ${{ inputs.generated_actions_per_level }}
+          --output data/environment_generated_transitions.npz
+          --manifest results/environment_generated_manifest.json
+      - name: Run four-stage curriculum
+        run: >-
+          python scripts/train_curriculum.py
+          --duck data/duck_dense_transitions.npz
+          --generated data/environment_generated_transitions.npz
+          --duck-epochs ${{ inputs.duck_epochs }}
+          --world-epochs ${{ inputs.world_epochs }}
+          --planner-epochs ${{ inputs.planner_epochs }}
+          --output-checkpoint checkpoints/duck_env_planner_drlqn_xs.npz
+          --metrics results/curriculum_metrics.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: trained-drlqn
+          retention-days: 14
+          path: |
+            checkpoints/duck_env_planner_drlqn_xs.npz
+            checkpoints/duck_env_planner_drlqn_xs.npz.json
+            results/duck_replay_report.json
+            results/environment_generated_manifest.json
+            results/curriculum_metrics.json
+
+  benchmark:
+    needs: train
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 10
+      matrix:
+        budget: [32, 100, 300, 600]
+        seed: [0, 1, 2, 3, 4]
+        shard: [0, 1, 2, 3, 4]
+    env:
+      PYTHONPATH: .
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --upgrade pip numpy requests arcengine==0.9.3
+      - uses: actions/download-artifact@v4
+        with:
+          name: trained-drlqn
+          path: trained
+      - name: Select deterministic game shard
+        shell: bash
+        run: |
+          mapfile -t ALL < <(find arc-prize-2026-arc-agi-3/environment_files -mindepth 3 -maxdepth 3 -name '*.py' ! -name '_*' -printf '%f\n' | sed 's/\.py$//' | sort -u)
+          ARGS=()
+          for i in "${!ALL[@]}"; do
+            if (( i % 5 == ${{ matrix.shard }} )); then ARGS+=(--game "${ALL[$i]}"); fi
+          done
+          printf '%q ' "${ARGS[@]}" > game_args.txt
+          cat game_args.txt
+      - name: Run matrix shard
+        shell: bash
+        run: |
+          eval "python scripts/benchmark_drlqn_matrix.py \
+            --budget ${{ matrix.budget }} \
+            --seed ${{ matrix.seed }} \
+            --duck-checkpoint trained/checkpoints/duck_env_planner_drlqn_xs.npz \
+            --rows results/matrix-${{ matrix.budget }}-${{ matrix.seed }}-${{ matrix.shard }}.jsonl \
+            --output results/summary-${{ matrix.budget }}-${{ matrix.seed }}-${{ matrix.shard }}.json \
+            $(cat game_args.txt)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: matrix-${{ matrix.budget }}-${{ matrix.seed }}-${{ matrix.shard }}
+          retention-days: 14
+          path: results/*.json*
+
+  merge:
+    needs: benchmark
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PYTHONPATH: .
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --upgrade pip numpy
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: matrix-*
+          path: matrix-shards
+          merge-multiple: false
+      - name: Merge all completed rows
+        run: >-
+          python scripts/merge_matrix_rows.py matrix-shards
+          --rows results/drlqn_baseline_matrix.jsonl
+          --output results/drlqn_baseline_matrix.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: complete-drlqn-matrix
+          retention-days: 30
+          path: results/drlqn_baseline_matrix.json*
