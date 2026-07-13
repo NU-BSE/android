@@ -19,6 +19,18 @@ on:
         description: Planner/value distillation epochs
         required: true
         default: '8'
+      run_accelerator_ablation:
+        description: Train and benchmark the four optional PyTorch students
+        required: true
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+        default: 'false'
+      accelerator_budget:
+        description: Official per-level budget for accelerator student comparison
+        required: true
+        default: '100'
 
 jobs:
   train:
@@ -63,11 +75,59 @@ jobs:
           name: trained-drlqn
           retention-days: 14
           path: |
+            data/duck_dense_transitions.npz
+            data/environment_generated_transitions.npz
             checkpoints/duck_env_planner_drlqn_xs.npz
             checkpoints/duck_env_planner_drlqn_xs.npz.json
             results/duck_replay_report.json
             results/environment_generated_manifest.json
             results/curriculum_metrics.json
+
+  accelerator:
+    needs: train
+    if: inputs.run_accelerator_ablation == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      PYTHONPATH: .
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install official runtime dependencies
+        run: python -m pip install --upgrade pip numpy arcengine==0.9.3
+      - name: Install CPU PyTorch
+        run: python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - uses: actions/download-artifact@v4
+        with:
+          name: trained-drlqn
+          path: trained
+      - name: Train all accelerator student candidates
+        run: >-
+          python scripts/train_accelerated_students.py
+          trained/data/duck_dense_transitions.npz
+          trained/data/environment_generated_transitions.npz
+          --output-dir checkpoints/accelerated
+          --metrics results/accelerated_student_ablation.json
+      - name: Evaluate completion and action efficiency on all official games
+        run: >-
+          python scripts/benchmark_accelerated_students.py
+          --checkpoint checkpoints/accelerated/large-drlqn.pt
+          --checkpoint checkpoints/accelerated/recurrent-visual.pt
+          --checkpoint checkpoints/accelerated/tile-transformer.pt
+          --checkpoint checkpoints/accelerated/drlqn-no-jvp.pt
+          --seed 0 --seed 1
+          --budget ${{ inputs.accelerator_budget }}
+          --output results/accelerated_official_benchmark.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: accelerator-student-ablation
+          retention-days: 14
+          path: |
+            checkpoints/accelerated/*.pt
+            results/accelerated_student_ablation.json
+            results/accelerated_official_benchmark.json
 
   benchmark:
     needs: train
