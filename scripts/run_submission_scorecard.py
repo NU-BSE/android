@@ -22,10 +22,23 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--game", action="append", default=[])
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--passes", type=int, default=1)
+    parser.add_argument(
+        "--allow-multiple-passes",
+        action="store_true",
+        help="Required when --passes exceeds one; use only when submission rules permit.",
+    )
     parser.add_argument("--max-actions-per-level", type=int, default=600)
     parser.add_argument("--max-levels", type=int, default=128)
-    parser.add_argument("--trace-dir", type=Path, default=Path("results/submission_traces"))
-    parser.add_argument("--output", type=Path, default=Path("results/submission_scorecard.json"))
+    parser.add_argument(
+        "--trace-dir",
+        type=Path,
+        default=Path("results/submission_traces"),
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("results/submission_scorecard.json"),
+    )
     return parser.parse_args()
 
 
@@ -43,40 +56,70 @@ class TraceEnvironment:
 
     def reset(self):
         frame = self.env.reset()
-        self.events.append({"kind": "reset", "level": int(self.env.level), "frame": _digest(frame.grid)})
+        self.events.append(
+            {
+                "kind": "reset",
+                "level": int(self.env.level),
+                "frame": _digest(frame.grid),
+            }
+        )
         return frame
 
     def reset_level(self):
         frame = self.env.reset_level()
-        self.events.append({"kind": "reset_level", "level": int(self.env.level), "frame": _digest(frame.grid)})
+        self.events.append(
+            {
+                "kind": "reset_level",
+                "level": int(self.env.level),
+                "frame": _digest(frame.grid),
+            }
+        )
         return frame
 
     def step(self, action: int, x: int | None = None, y: int | None = None):
         level_before = int(self.env.level)
-        before = _digest(self.env._last_grid(self.env._response)) if self.env._response is not None else None
+        before = (
+            _digest(self.env._last_grid(self.env._response))
+            if self.env._response is not None
+            else None
+        )
         result = self.env.step(action, x, y)
-        self.events.append({
-            "kind": "action",
-            "index": int(self.env.action_count),
-            "action": int(action),
-            "x": x,
-            "y": y,
-            "level_before": level_before,
-            "level_after": int(self.env.level),
-            "frame_before": before,
-            "frame_after": _digest(result.frame.grid),
-            "level_won": bool(result.level_won),
-            "env_won": bool(result.env_won),
-            "state": str(self.env.state),
-        })
+        self.events.append(
+            {
+                "kind": "action",
+                "index": int(self.env.action_count),
+                "action": int(action),
+                "x": x,
+                "y": y,
+                "level_before": level_before,
+                "level_after": int(self.env.level),
+                "frame_before": before,
+                "frame_after": _digest(result.frame.grid),
+                "level_won": bool(result.level_won),
+                "env_won": bool(result.env_won),
+                "state": str(self.env.state),
+            }
+        )
         return result
 
 
 def _pass_config(index: int) -> dict[str, bool]:
     configs = (
-        {"planner_portfolio": True, "graph_planning": True, "differential_complexity": True},
-        {"planner_portfolio": False, "graph_planning": True, "differential_complexity": False},
-        {"planner_portfolio": True, "graph_planning": False, "differential_complexity": False},
+        {
+            "planner_portfolio": True,
+            "graph_planning": True,
+            "differential_complexity": True,
+        },
+        {
+            "planner_portfolio": False,
+            "graph_planning": True,
+            "differential_complexity": False,
+        },
+        {
+            "planner_portfolio": True,
+            "graph_planning": False,
+            "differential_complexity": False,
+        },
     )
     return configs[index % len(configs)]
 
@@ -101,6 +144,11 @@ def main() -> None:
         raise SystemExit(f"checkpoint does not exist: {args.checkpoint}")
     if args.passes <= 0 or args.max_actions_per_level <= 0 or args.max_levels <= 0:
         raise SystemExit("passes, budgets and level limits must be positive")
+    if args.passes > 1 and not args.allow_multiple_passes:
+        raise SystemExit(
+            "multiple passes require --allow-multiple-passes after confirming the "
+            "current competition rules permit complementary reruns"
+        )
     try:
         import arc_agi
         from arcengine import GameAction
@@ -108,7 +156,11 @@ def main() -> None:
         raise SystemExit("Install competition wheels before running the scorecard") from exc
 
     selected = set(args.game)
-    payload = {"checkpoint": str(args.checkpoint), "passes": []}
+    payload = {
+        "checkpoint": str(args.checkpoint),
+        "passes": [],
+        "multiple_passes_explicitly_allowed": bool(args.allow_multiple_passes),
+    }
     args.trace_dir.mkdir(parents=True, exist_ok=True)
     for pass_index in range(args.passes):
         pass_seed = int(args.seed + pass_index * 10_000)
@@ -116,7 +168,8 @@ def main() -> None:
         np.random.seed(pass_seed)
         arcade = arc_agi.Arcade()
         environments = [
-            info for info in arcade.available_environments
+            info
+            for info in arcade.available_environments
             if not selected or info.game_id in selected
         ]
         config = _pass_config(pass_index)
@@ -135,27 +188,44 @@ def main() -> None:
                 **config,
             )
             metadata = load_solver_checkpoint(solver, args.checkpoint)
-            budgets = {level: int(args.max_actions_per_level) for level in range(1, args.max_levels + 1)}
+            budgets = {
+                level: int(args.max_actions_per_level)
+                for level in range(1, args.max_levels + 1)
+            }
             result = solver.run_env(traced, budgets)
-            excess = {level: count for level, count in result.actions_per_level.items() if count > args.max_actions_per_level}
+            excess = {
+                level: count
+                for level, count in result.actions_per_level.items()
+                if count > args.max_actions_per_level
+            }
             if excess:
-                raise RuntimeError(f"action budget exceeded for {info.game_id}: {excess}")
-            trace_path = args.trace_dir / f"pass-{pass_index:02d}-{info.game_id}.json"
-            trace_path.write_text(json.dumps({
-                "game": info.game_id,
-                "seed": game_seed,
-                "config": config,
-                "checkpoint_metadata": metadata,
-                "result": {
-                    "won": bool(result.won),
-                    "completed": int(result.completed),
-                    "actions_per_level": result.actions_per_level,
-                    "total_actions": int(result.total_actions),
-                    "updates": int(result.updates),
-                    "telemetry": result.telemetry,
-                },
-                "events": traced.events,
-            }, indent=2), encoding="utf-8")
+                raise RuntimeError(
+                    f"action budget exceeded for {info.game_id}: {excess}"
+                )
+            trace_path = (
+                args.trace_dir / f"pass-{pass_index:02d}-{info.game_id}.json"
+            )
+            trace_path.write_text(
+                json.dumps(
+                    {
+                        "game": info.game_id,
+                        "seed": game_seed,
+                        "config": config,
+                        "checkpoint_metadata": metadata,
+                        "result": {
+                            "won": bool(result.won),
+                            "completed": int(result.completed),
+                            "actions_per_level": result.actions_per_level,
+                            "total_actions": int(result.total_actions),
+                            "updates": int(result.updates),
+                            "telemetry": result.telemetry,
+                        },
+                        "events": traced.events,
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
             row = {
                 "game": info.game_id,
                 "seed": game_seed,
@@ -166,13 +236,15 @@ def main() -> None:
             }
             rows.append(row)
             print(json.dumps({"pass": pass_index, **row}, sort_keys=True))
-        payload["passes"].append({
-            "index": pass_index,
-            "seed": pass_seed,
-            "config": config,
-            "games": rows,
-            "scorecard": _scorecard(arcade),
-        })
+        payload["passes"].append(
+            {
+                "index": pass_index,
+                "seed": pass_seed,
+                "config": config,
+                "games": rows,
+                "scorecard": _scorecard(arcade),
+            }
+        )
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(payload, indent=2), encoding="utf-8")
