@@ -4,8 +4,13 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import sys
 
-from scripts.benchmark_drlqn_matrix import _aggregate, _run_key
+try:
+    from scripts.benchmark_drlqn_matrix import _aggregate, _run_key
+except ModuleNotFoundError:  # direct `python scripts/merge_matrix_rows.py`
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from benchmark_drlqn_matrix import _aggregate, _run_key
 
 
 def main() -> None:
@@ -32,6 +37,7 @@ def main() -> None:
         "errors": [row for row in rows if row.get("error")],
         "rows_file": str(args.rows),
     }
+    args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     print(json.dumps({"runs": len(rows), "errors": len(payload["errors"])}, sort_keys=True))
 
