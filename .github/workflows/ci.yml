@@ -67,6 +67,7 @@ jobs:
           scripts/train_curriculum.py
           scripts/train_accelerated_students.py
           scripts/benchmark_drlqn_matrix.py
+          scripts/merge_matrix_rows.py
           scripts/run_submission_scorecard.py
           scripts/package_submission.py
           scripts/validate_submission_bundle.py
