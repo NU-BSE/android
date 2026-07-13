@@ -11,7 +11,12 @@ import numpy as np
 from drlqn.config import drlqn_xs
 from drlqn.train.checkpoint import load_solver_checkpoint, save_model_checkpoint
 from drlqn.train.curriculum import EnvironmentTransitionTrainer, PlannerValueDistiller
-from drlqn.train.dense_sft import DenseDuckSFTTrainer, PreparedDenseSFT, prepare_dense_examples, split_by_game_and_seed
+from drlqn.train.dense_sft import (
+    DenseDuckSFTTrainer,
+    PreparedDenseSFT,
+    prepare_dense_examples,
+    split_by_game_and_seed,
+)
 from drlqn.train.duck_dataset import load_duck_traces
 from drlqn.train.submission_solver import SubmissionDRLQNSolver
 
@@ -28,8 +33,16 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--held-out-game", action="append", default=[])
     parser.add_argument("--held-out-game-count", type=int, default=2)
     parser.add_argument("--input-checkpoint", type=Path)
-    parser.add_argument("--output-checkpoint", type=Path, default=Path("checkpoints/duck_env_planner_drlqn_xs.npz"))
-    parser.add_argument("--metrics", type=Path, default=Path("results/curriculum_metrics.json"))
+    parser.add_argument(
+        "--output-checkpoint",
+        type=Path,
+        default=Path("checkpoints/duck_env_planner_drlqn_xs.npz"),
+    )
+    parser.add_argument(
+        "--metrics",
+        type=Path,
+        default=Path("results/curriculum_metrics.json"),
+    )
     return parser.parse_args()
 
 
@@ -55,7 +68,10 @@ def _stage(
         result = {
             "stage": name,
             "epoch": epoch,
-            "train": {key: float(np.mean([row[key] for row in rows])) for key in numeric},
+            "train": {
+                key: float(np.mean([row[key] for row in rows]))
+                for key in numeric
+            },
         }
         if evaluate is not None:
             result["evaluation"] = evaluate(items)
@@ -93,6 +109,14 @@ def main() -> None:
     if not duck_train or not generated_train:
         raise SystemExit("grouped split removed all examples from a curriculum stage")
 
+    # Keep a small Duck replay stream during environment-model training to avoid
+    # catastrophic forgetting, then mix Duck and planner trajectories for the
+    # final action/value distillation stage. Random actions remain value/effect
+    # evidence but are masked from planner imitation by PlannerValueDistiller.
+    duck_replay_stride = max(1, len(duck_train) // max(1, len(generated_train) // 4))
+    world_train = [*generated_train, *duck_train[::duck_replay_stride]]
+    planner_train = [*generated_train, *duck_train]
+
     solver = SubmissionDRLQNSolver(drlqn_xs(), seed=args.seed)
     if args.input_checkpoint:
         load_solver_checkpoint(solver, args.input_checkpoint)
@@ -100,30 +124,65 @@ def main() -> None:
     history = []
 
     duck_trainer = DenseDuckSFTTrainer(solver, seed=args.seed)
-    history.extend(_stage("duck_sft", args.duck_epochs, duck_train, duck_trainer, args.batch_size, rng))
+    history.extend(
+        _stage(
+            "duck_sft",
+            args.duck_epochs,
+            duck_train,
+            duck_trainer,
+            args.batch_size,
+            rng,
+        )
+    )
 
-    world_trainer = EnvironmentTransitionTrainer(solver, seed=args.seed)
-    history.extend(_stage("environment_world_model", args.world_epochs, generated_train, world_trainer, args.batch_size, rng))
+    world_trainer = EnvironmentTransitionTrainer(
+        solver,
+        seed=args.seed,
+        heads=duck_trainer.heads,
+    )
+    history.extend(
+        _stage(
+            "environment_world_model",
+            args.world_epochs,
+            world_train,
+            world_trainer,
+            args.batch_size,
+            rng,
+        )
+    )
 
     planner_trainer = PlannerValueDistiller(solver)
-    history.extend(_stage("planner_value_distillation", args.planner_epochs, generated_train, planner_trainer, args.batch_size, rng))
+    history.extend(
+        _stage(
+            "planner_value_distillation",
+            args.planner_epochs,
+            planner_train,
+            planner_trainer,
+            args.batch_size,
+            rng,
+        )
+    )
 
-    final_evaluator = DenseDuckSFTTrainer(solver, seed=args.seed + 1)
     evaluation = {
-        "validation": final_evaluator.evaluate(split.validation),
-        "held_out_games": final_evaluator.evaluate(split.held_out),
+        "validation": duck_trainer.evaluate(split.validation),
+        "held_out_games": duck_trainer.evaluate(split.held_out),
     }
     metadata = {
         "config": solver.cfg.name,
         "source": "duck-environment-planner-curriculum",
         "curriculum": [
             "duck_sft",
-            "environment_world_model",
-            "planner_value_distillation",
+            "environment_world_model_with_duck_replay",
+            "planner_value_distillation_with_duck_mix",
             "online_adaptation_at_evaluation",
         ],
         "duck_examples": len(duck),
         "generated_examples": len(generated),
+        "stage_examples": {
+            "duck_sft": len(duck_train),
+            "environment_world_model": len(world_train),
+            "planner_value_distillation": len(planner_train),
+        },
         "held_out_games": list(split.held_out_games),
         "updates": int(solver.updates),
         "evaluation": evaluation,
@@ -132,7 +191,10 @@ def main() -> None:
     validator = SubmissionDRLQNSolver(drlqn_xs(), seed=args.seed + 2)
     validated = load_solver_checkpoint(validator, args.output_checkpoint)
     args.metrics.parent.mkdir(parents=True, exist_ok=True)
-    args.metrics.write_text(json.dumps({"metadata": validated, "history": history}, indent=2), encoding="utf-8")
+    args.metrics.write_text(
+        json.dumps({"metadata": validated, "history": history}, indent=2),
+        encoding="utf-8",
+    )
     print(f"checkpoint: {args.output_checkpoint}")
     print(f"metrics: {args.metrics}")
 
