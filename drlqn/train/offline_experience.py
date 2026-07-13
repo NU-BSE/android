@@ -50,7 +50,9 @@ def collect_trajectory(
     node = solver.perceive(env, frame.grid)
     trajectory_id = f"generated/{policy}/{env.env_id}/seed-{int(seed)}"
     examples: list[DuckExample] = []
-    visual_visits: dict[tuple[int, str], int] = {}
+    visual_visits: dict[tuple[int, str], int] = {
+        (int(env.level), _frame_key(frame.grid, int(env.level))): 1
+    }
 
     while env.state == "NOT_FINISHED":
         level = int(env.level)
@@ -115,13 +117,15 @@ def collect_trajectory(
         if step.env_won or env.state == "GAME_OVER":
             break
 
-    won = bool(env.state == "WIN")
+    # A rollout that reaches any level reward is useful positive evidence even if
+    # the finite collection budget ends before the complete environment win.
+    successful = bool(env.state == "WIN" or any(item.level_advanced for item in examples))
     total = len(examples)
     return [
         replace(
             example,
             remaining_path_length=total - index - 1,
-            success=won,
+            success=successful,
         )
         for index, example in enumerate(examples)
     ]
@@ -134,10 +138,20 @@ def experience_summary(examples: list[DuckExample]) -> dict[str, Any]:
         "transitions": len(examples),
         "trajectories": len(trajectories),
         "games": len(games),
-        "visual_change_rate": float(np.mean([bool(item.visual_changed) for item in examples])) if examples else 0.0,
+        "visual_change_rate": (
+            float(np.mean([bool(item.visual_changed) for item in examples]))
+            if examples
+            else 0.0
+        ),
         "level_advances": sum(int(bool(item.level_advanced)) for item in examples),
         "successful_transitions": sum(int(item.success is True) for item in examples),
-        "no_change_negative_evidence": sum("negative:no_change" in item.reasoning for item in examples),
-        "cycle_negative_evidence": sum("negative:cycle_or_regression" in item.reasoning for item in examples),
-        "terminal_failures": sum("negative:terminal_failure" in item.reasoning for item in examples),
+        "no_change_negative_evidence": sum(
+            "negative:no_change" in item.reasoning for item in examples
+        ),
+        "cycle_negative_evidence": sum(
+            "negative:cycle_or_regression" in item.reasoning for item in examples
+        ),
+        "terminal_failures": sum(
+            "negative:terminal_failure" in item.reasoning for item in examples
+        ),
     }
