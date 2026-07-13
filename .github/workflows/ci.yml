@@ -23,6 +23,9 @@ jobs:
           - tests/test_duck_sft.py
           - tests/test_duck_dense_replay.py
           - tests/test_drlqn_ablation_solver.py
+          - tests/test_planner_portfolio.py
+          - tests/test_offline_experience.py
+          - tests/test_curriculum.py
           - tests/test_submission_run.py
           - tests/test_spatial.py::test_infers_rendered_tile_scale
           - tests/test_spatial.py::test_proposals_cover_individual_cells_inside_merged_region
@@ -45,6 +48,31 @@ jobs:
         env:
           PYTHONPATH: .
         run: pytest -vv ${{ matrix.test_target }}
+
+  syntax-and-entrypoints:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Compile new training and submission entry points
+        run: >-
+          python -m py_compile
+          drlqn/planning/portfolio.py
+          drlqn/train/offline_experience.py
+          drlqn/train/curriculum.py
+          drlqn/accelerator/models.py
+          scripts/generate_offline_experience.py
+          scripts/train_curriculum.py
+          scripts/train_accelerated_students.py
+          scripts/benchmark_accelerated_students.py
+          scripts/benchmark_drlqn_matrix.py
+          scripts/merge_matrix_rows.py
+          scripts/run_submission_scorecard.py
+          scripts/package_submission.py
+          scripts/validate_submission_bundle.py
 
   official-environment-runtime:
     runs-on: ubuntu-latest
