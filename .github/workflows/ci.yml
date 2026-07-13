@@ -25,6 +25,7 @@ jobs:
           - tests/test_drlqn_ablation_solver.py
           - tests/test_planner_portfolio.py
           - tests/test_offline_experience.py
+          - tests/test_curriculum.py
           - tests/test_submission_run.py
           - tests/test_spatial.py::test_infers_rendered_tile_scale
           - tests/test_spatial.py::test_proposals_cover_individual_cells_inside_merged_region
@@ -66,6 +67,7 @@ jobs:
           scripts/generate_offline_experience.py
           scripts/train_curriculum.py
           scripts/train_accelerated_students.py
+          scripts/benchmark_accelerated_students.py
           scripts/benchmark_drlqn_matrix.py
           scripts/merge_matrix_rows.py
           scripts/run_submission_scorecard.py
