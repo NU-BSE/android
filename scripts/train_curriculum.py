@@ -60,10 +60,33 @@ def _stage(
     batch_size: int,
     rng: np.random.Generator,
     evaluate: Callable[[Sequence[PreparedDenseSFT]], dict] | None = None,
+    heartbeat_batches: int = 100,
 ) -> list[dict]:
     history = []
+    heartbeat_batches = max(1, int(heartbeat_batches))
+    total_batches = (len(items) + batch_size - 1) // batch_size
     for epoch in range(1, epochs + 1):
-        rows = [trainer.train_batch(batch) for batch in _batches(items, batch_size, rng)]
+        rows = []
+        for batch_index, batch in enumerate(_batches(items, batch_size, rng), start=1):
+            rows.append(trainer.train_batch(batch))
+            if total_batches > 1 and (
+                batch_index == 1
+                or batch_index == total_batches
+                or batch_index % heartbeat_batches == 0
+            ):
+                print(
+                    json.dumps(
+                        {
+                            "event": "batch_progress",
+                            "stage": name,
+                            "epoch": epoch,
+                            "batch": batch_index,
+                            "total_batches": total_batches,
+                        },
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
         numeric = sorted(set.intersection(*(set(row) for row in rows))) if rows else []
         result = {
             "stage": name,
@@ -76,7 +99,7 @@ def _stage(
         if evaluate is not None:
             result["evaluation"] = evaluate(items)
         history.append(result)
-        print(json.dumps(result, sort_keys=True))
+        print(json.dumps(result, sort_keys=True), flush=True)
     return history
 
 
