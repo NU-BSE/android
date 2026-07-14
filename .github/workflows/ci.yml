@@ -22,6 +22,7 @@ jobs:
           - tests/test_distill.py
           - tests/test_duck_sft.py
           - tests/test_duck_dense_replay.py
+          - tests/test_replay_duck_trajectories.py
           - tests/test_arc_dataset_client.py
           - tests/test_drlqn_ablation_solver.py
           - tests/test_planner_portfolio.py
