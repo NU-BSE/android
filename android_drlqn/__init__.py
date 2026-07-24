@@ -1,5 +1,18 @@
-"""Android-only DRLQN package."""
+"""Android DRLQN package with policy-safe human navigation guidance."""
 
+from .advisor import (
+    AdviceStatus,
+    AdvisorConfig,
+    AdvisorPolicyError,
+    AdvisorReply,
+    ChatMessage,
+    GenerationOptions,
+    LocalChatModel,
+    PlannerAdvisor,
+    SensitiveTextRedactor,
+    UserActionStep,
+)
+from .advisory_model import AdvisoryDRLQN, AdvisoryModelConfig
 from .core import (
     AccessibilityNode,
     AccessibilitySnapshot,
@@ -18,29 +31,75 @@ from .core import (
     prepare_model_inputs,
     verify_transition,
 )
+from .device_profiles import (
+    BackendDecision,
+    BenchmarkSample,
+    DeviceCapabilities,
+    DeviceFamily,
+    DeviceProfileSelector,
+    DeviceTier,
+    InferenceProfile,
+    ModelFamily,
+    Quantization,
+    RuntimeBackend,
+    SocVendor,
+)
 from .model import AndroidDRLQN, AndroidDRLQNConfig
+from .runtime_config import (
+    BuildManifest,
+    litert_export_manifest,
+    onnxruntime_android_manifest,
+    write_manifest,
+)
 from .window_graph import PlannerSubgoal, SubgoalType, WindowGraph
 
 __all__ = [
     "AccessibilityNode",
     "AccessibilitySnapshot",
+    "AdviceStatus",
+    "AdvisoryDRLQN",
+    "AdvisoryModelConfig",
+    "AdvisorConfig",
+    "AdvisorPolicyError",
+    "AdvisorReply",
     "AndroidBatchConfig",
     "AndroidDRLQN",
     "AndroidDRLQNConfig",
     "AndroidState",
+    "BackendDecision",
+    "BenchmarkSample",
     "Bounds",
+    "BuildManifest",
     "Caption",
+    "ChatMessage",
+    "DeviceCapabilities",
+    "DeviceFamily",
+    "DeviceProfileSelector",
+    "DeviceTier",
+    "GenerationOptions",
     "GestureAction",
     "GestureType",
+    "InferenceProfile",
+    "LocalChatModel",
+    "ModelFamily",
+    "PlannerAdvisor",
     "PlannerSubgoal",
+    "Quantization",
+    "RuntimeBackend",
     "ScreenshotFrame",
+    "SensitiveTextRedactor",
+    "SocVendor",
     "SubgoalType",
     "TimestampSynchronizer",
     "UIEvent",
+    "UserActionStep",
     "VerificationExpectation",
     "ViewportMetadata",
     "WindowGraph",
+    "litert_export_manifest",
     "normalize_screenshot",
+    "onnxruntime_android_manifest",
     "prepare_model_inputs",
     "verify_transition",
+    "write_manifest",
 ]
