@@ -1,2 +1,0 @@
--r requirements-client.txt
-optuna>=4,<5

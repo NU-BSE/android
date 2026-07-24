@@ -1,1 +1,0 @@
-This branch is a research candidate, not a claim of top-performance parity. Its purpose is to remove the largest action-interface bottleneck and make Duck-trace distillation technically feasible without replacing DRLQN's fixed Q head.

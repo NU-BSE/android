@@ -1,1 +1,0 @@
-Validation is performed by `.github/workflows/ci.yml`. Official competition execution still requires the mounted `environment_files` tree and Kaggle/ARC runtime not available to this connector session.

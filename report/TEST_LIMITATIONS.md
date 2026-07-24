@@ -1,1 +1,0 @@
-The branch CI can execute the repository's local NumPy tests. It cannot reproduce the official Kaggle submission runtime or access private competition environment mounts; those checks must be run where `/arc-prize-2026-arc-agi-3/environment_files` is available.
