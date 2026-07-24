@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "android-drlqn"
-version = "0.1.0"
-description = "Android-only DRLQN agent for timestamped window trajectories"
+version = "0.2.0"
+description = "Policy-safe Android DRLQN planner with on-device chat guidance"
 requires-python = ">=3.10"
 dependencies = ["numpy>=1.24"]
 
