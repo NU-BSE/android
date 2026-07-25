@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "android-drlqn"
-version = "0.2.0"
-description = "Policy-safe Android DRLQN planner with on-device chat guidance"
+version = "0.3.0"
+description = "Evidence-backed Android DRLQN with local VLM and chat coordination"
 requires-python = ">=3.10"
 dependencies = ["numpy>=1.24"]
 
