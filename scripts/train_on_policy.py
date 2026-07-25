@@ -9,21 +9,22 @@ import urllib.request
 from pathlib import Path
 
 from android_drlqn.distillation import (
+    DistillationRunManifest,
     EnvironmentOutcome,
     NumpyLinearStudent,
     NumpyPolicyUpdater,
-    OnPolicyDistiller,
+    ProposalKind,
     ReplayTeacher,
     RolloutObservation,
     StrictJsonTeacher,
     TeacherJudgement,
     TeacherProfile,
     TeacherTarget,
-    DistillationRunManifest,
     load_distillation_config,
 )
 from android_drlqn.document_curriculum import CoverageLedger, DocumentationCurriculumBuilder, load_source_registry
 from android_drlqn.emulator_lab import load_emulator_matrix
+from android_drlqn.on_policy import OnPolicyDistiller
 
 
 class FixtureEnvironment:
@@ -88,7 +89,7 @@ def replay_teacher(tasks, matrix):
             judgements[key] = TeacherJudgement(
                 "replay-teacher", 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, True,
                 TeacherTarget(
-                    preferred_kind=list(__import__("android_drlqn.distillation", fromlist=["ProposalKind"]).ProposalKind)[0],
+                    preferred_kind=ProposalKind.TAP,
                     target_label=str(task.expected_output.get("display_name") or "") or None,
                     response=str(task.expected_output.get("display_name") or task.prompt),
                 ),
@@ -155,13 +156,8 @@ def main():
     else:
         raise SystemExit("real training requires --environment-plugin; CI replay requires --fixture")
 
-    if teacher_config.profile is TeacherProfile.REPLAY:
-        teacher = replay_teacher(actionable_tasks, matrix)
-    else:
-        teacher = StrictJsonTeacher(teacher_config, HttpTransport())
-
-    distiller = OnPolicyDistiller(student, teacher, updater, environment_factory, policy_config, coverage)
-    metrics = distiller.train(actionable_tasks, matrix)
+    teacher = replay_teacher(actionable_tasks, matrix) if teacher_config.profile is TeacherProfile.REPLAY else StrictJsonTeacher(teacher_config, HttpTransport())
+    metrics = OnPolicyDistiller(student, teacher, updater, environment_factory, policy_config, coverage).train(actionable_tasks, matrix)
     coverage.write_json(output / "coverage.json")
     manifest = DistillationRunManifest.create(
         teacher_config,
