@@ -20,9 +20,9 @@ from .device_profiles import (
 from .distillation import (
     DistillationMetrics, DistillationRunManifest, DistillationSample,
     EmulatorEnvironment, EnvironmentOutcome, NumpyLinearStudent,
-    NumpyPolicyUpdater, OnPolicyConfig, OnPolicyDistiller, PolicyUpdater,
-    ProposalKind, ReplayTeacher, RolloutObservation, StrictJsonTeacher,
-    StudentPolicy, StudentProposal, TeacherEndpointConfig, TeacherEvaluator,
+    NumpyPolicyUpdater, OnPolicyConfig, PolicyUpdater, ProposalKind,
+    ReplayTeacher, RolloutObservation, StrictJsonTeacher, StudentPolicy,
+    StudentProposal, TeacherEndpointConfig, TeacherEvaluator,
     TeacherJudgement, TeacherProfile, TeacherTarget, TorchOnPolicyUpdater,
     load_distillation_config,
 )
@@ -38,6 +38,7 @@ from .emulator_lab import (
     selected_emulator_matrix,
 )
 from .model import AndroidDRLQN, AndroidDRLQNConfig
+from .on_policy import OnPolicyDistiller
 from .runtime_config import BuildManifest, litert_export_manifest, onnxruntime_android_manifest, write_manifest
 from .settings_agent import (
     ActionReceipt, ControlPlane, CoordinatorSession, CoordinatorTurn,
