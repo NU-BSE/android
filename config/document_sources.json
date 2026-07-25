@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "coverage_definition": "Every section discovered at the pinned source revision must be normalized and end in validated, non_actionable, or explicitly blocked status. Any source revision change invalidates completion.",
+  "sources": [
+    {
+      "source_key": "android_settings_api",
+      "os_family": "android-aosp",
+      "root_url": "https://developer.android.com/reference/android/provider/Settings",
+      "repository_url": null,
+      "confidence_tier": 1,
+      "license_identifier": "Android-Docs-Apache-2.0-or-CC-BY-2.5",
+      "discovery_mode": "official_index",
+      "allowed_hosts": ["developer.android.com"],
+      "required_classes": ["api_reference", "permission_security"]
+    },
+    {
+      "source_key": "aosp_settings_source",
+      "os_family": "android-aosp",
+      "root_url": "https://android.googlesource.com/platform/packages/apps/Settings/",
+      "repository_url": "https://android.googlesource.com/platform/packages/apps/Settings/",
+      "confidence_tier": 0,
+      "license_identifier": "Apache-2.0",
+      "discovery_mode": "git_commit",
+      "allowed_hosts": ["android.googlesource.com"],
+      "required_classes": ["source_code", "settings_ui_path", "resource_overlay"]
+    },
+    {
+      "source_key": "aosp_settings_provider_source",
+      "os_family": "android-aosp",
+      "root_url": "https://android.googlesource.com/platform/packages/providers/SettingsProvider/",
+      "repository_url": "https://android.googlesource.com/platform/packages/providers/SettingsProvider/",
+      "confidence_tier": 0,
+      "license_identifier": "Apache-2.0",
+      "discovery_mode": "git_commit",
+      "allowed_hosts": ["android.googlesource.com"],
+      "required_classes": ["source_code", "permission_security"]
+    },
+    {
+      "source_key": "grapheneos_official_docs",
+      "os_family": "grapheneos",
+      "root_url": "https://grapheneos.org/",
+      "repository_url": "https://github.com/GrapheneOS/grapheneos.org",
+      "confidence_tier": 0,
+      "license_identifier": "MIT",
+      "discovery_mode": "git_commit",
+      "allowed_hosts": ["grapheneos.org", "github.com", "raw.githubusercontent.com"],
+      "required_classes": ["user_guide", "settings_ui_path", "release_notes", "permission_security", "device_support"]
+    },
+    {
+      "source_key": "calyxos_official_docs",
+      "os_family": "calyxos",
+      "root_url": "https://calyxos.org/docs/",
+      "repository_url": "https://github.com/CalyxOS/calyxos.org",
+      "confidence_tier": 1,
+      "license_identifier": "REVIEW-PER-FILE",
+      "discovery_mode": "git_commit",
+      "allowed_hosts": ["calyxos.org", "github.com", "raw.githubusercontent.com"],
+      "required_classes": ["user_guide", "settings_ui_path", "device_support", "permission_security"]
+    },
+    {
+      "source_key": "calyxos_platform_source",
+      "os_family": "calyxos",
+      "root_url": "https://gitlab.com/CalyxOS/",
+      "repository_url": "https://gitlab.com/CalyxOS/",
+      "confidence_tier": 0,
+      "license_identifier": "REVIEW-PER-REPOSITORY",
+      "discovery_mode": "pinned_manifest",
+      "allowed_hosts": ["gitlab.com"],
+      "required_classes": ["source_code", "resource_overlay", "settings_ui_path"]
+    },
+    {
+      "source_key": "eos_official_docs",
+      "os_family": "eos",
+      "root_url": "https://doc.e.foundation/",
+      "repository_url": null,
+      "confidence_tier": 1,
+      "license_identifier": "CC-BY-SA",
+      "discovery_mode": "official_index",
+      "allowed_hosts": ["doc.e.foundation"],
+      "required_classes": ["user_guide", "settings_ui_path", "device_support", "permission_security", "legal_license"]
+    },
+    {
+      "source_key": "eos_emulator_docs",
+      "os_family": "eos",
+      "root_url": "https://doc.e.foundation/os/how-to/emulator",
+      "repository_url": null,
+      "confidence_tier": 1,
+      "license_identifier": "CC-BY-SA",
+      "discovery_mode": "single_versioned_page",
+      "allowed_hosts": ["doc.e.foundation", "images.ecloud.global"],
+      "required_classes": ["device_support", "user_guide", "legal_license"]
+    }
+  ]
+}
