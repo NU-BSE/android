@@ -38,6 +38,15 @@ from .emulator_lab import (
     selected_emulator_matrix,
 )
 from .model import AndroidDRLQN, AndroidDRLQNConfig
+from .ollama_runtime import (
+    GROUNDING_SCHEMA, JUDGEMENT_SCHEMA, OllamaChatModel, OllamaClient,
+    OllamaEnsembleConfig, OllamaModelSpec, OllamaModelStatus,
+    OllamaMultimodalGenerator, OllamaQwenTeacher, OllamaRuntimeBundle,
+    OllamaRuntimeError, OllamaServerConfig, OllamaTeacherEnsemble,
+    OllamaUITarsCritic, UITarsAction, critic_agreement,
+    load_image_reference, parse_teacher_judgement, parse_ui_tars_action,
+    smoke_image_base64,
+)
 from .on_policy import OnPolicyDistiller
 from .runtime_config import BuildManifest, litert_export_manifest, onnxruntime_android_manifest, write_manifest
 from .settings_agent import (
