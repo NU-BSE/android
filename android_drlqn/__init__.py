@@ -43,6 +43,10 @@ from .emulator_runtime import (
     serial_for_port,
 )
 from .model import AndroidDRLQN, AndroidDRLQNConfig
+from .model_launch import (
+    DistillationMode, ModelLaunchBundle, ModelLaunchConfig, OSLaunchProfile,
+    OSSettingRecord, OSSettingsRegistry, aggregate_distillation_metrics,
+)
 from .ollama_runtime import (
     GROUNDING_SCHEMA, JUDGEMENT_SCHEMA, OllamaChatModel, OllamaClient,
     OllamaEnsembleConfig, OllamaModelSpec, OllamaModelStatus,
