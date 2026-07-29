@@ -36,3 +36,17 @@ sections and evidence-linked `setting_variant` claims.
 For a controlled migration to a new upstream revision, inspect the new raw
 snapshots and run once without `--fail-on-stale-source`. Commit or archive the
 resulting manifest before restoring the stale-source gate.
+
+## Monorepository sources
+
+For a source that lives inside a larger Git repository, set `repository_url` to
+the cloneable repository root and `repository_subpath` to a normalized relative
+directory. The scraper uses cone-mode sparse checkout, so only that subtree is
+materialized. For AOSP SettingsProvider this is:
+
+```json
+{
+  "repository_url": "https://android.googlesource.com/platform/frameworks/base",
+  "repository_subpath": "packages/SettingsProvider"
+}
+```

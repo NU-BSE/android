@@ -161,3 +161,88 @@ def test_missing_required_class_fails(tmp_path, server):
     sources.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(scraper.ScrapeError, match="required document classes"):
         scraper.run(_args(tmp_path, sources))
+
+
+def test_repository_subpath_is_normalized_and_validated():
+    spec = scraper.SourceSpec.from_mapping(
+        {
+            "source_key": "aosp_provider",
+            "os_family": "android-aosp",
+            "root_url": "https://android.googlesource.com/platform/frameworks/base/+/refs/heads/main/packages/SettingsProvider/",
+            "repository_url": "https://android.googlesource.com/platform/frameworks/base",
+            "repository_subpath": "packages/SettingsProvider",
+            "confidence_tier": 0,
+            "license_identifier": "Apache-2.0",
+            "discovery_mode": "git_commit",
+            "allowed_hosts": ["android.googlesource.com"],
+            "required_classes": ["source_code"],
+        }
+    )
+    assert spec.repository_subpath == "packages/SettingsProvider"
+
+    with pytest.raises(ValueError, match="repository_subpath"):
+        scraper.SourceSpec.from_mapping(
+            {
+                "source_key": "bad_subpath",
+                "os_family": "android-aosp",
+                "root_url": "https://android.googlesource.com/platform/frameworks/base/",
+                "repository_url": "https://android.googlesource.com/platform/frameworks/base",
+                "repository_subpath": "../SettingsProvider",
+                "confidence_tier": 0,
+                "license_identifier": "Apache-2.0",
+                "discovery_mode": "git_commit",
+                "allowed_hosts": ["android.googlesource.com"],
+                "required_classes": [],
+            }
+        )
+
+
+def test_git_snapshotter_uses_sparse_checkout_for_repository_subpath(tmp_path, monkeypatch):
+    revision = "a" * 40
+    commands: list[list[str]] = []
+
+    class RecordingSnapshotter(scraper.GitSnapshotter):
+        def _resolve_head(self, repository: str) -> str:
+            return revision
+
+        def _run(self, command, timeout=30.0):
+            command = list(command)
+            commands.append(command)
+            if "clone" in command:
+                checkout = Path(command[-1])
+                checkout.mkdir(parents=True)
+            elif "checkout" in command:
+                checkout = Path(command[command.index("-C") + 1])
+                target = checkout / "packages" / "SettingsProvider" / "src"
+                target.mkdir(parents=True)
+                (target / "SettingsProvider.java").write_text(
+                    "class SettingsProvider { // settings security permission }", encoding="utf-8"
+                )
+            elif command[-2:] == ["rev-parse", "HEAD"]:
+                return revision
+            return ""
+
+    source = scraper.SourceSpec.from_mapping(
+        {
+            "source_key": "aosp_provider",
+            "os_family": "android-aosp",
+            "root_url": "https://android.googlesource.com/platform/frameworks/base/+/refs/heads/main/packages/SettingsProvider/",
+            "repository_url": "https://android.googlesource.com/platform/frameworks/base",
+            "repository_subpath": "packages/SettingsProvider",
+            "confidence_tier": 0,
+            "license_identifier": "Apache-2.0",
+            "discovery_mode": "git_commit",
+            "allowed_hosts": ["android.googlesource.com"],
+            "required_classes": ["source_code"],
+        }
+    )
+    monkeypatch.setattr(scraper.shutil, "which", lambda name: "/usr/bin/git")
+    resolved, documents, warnings = RecordingSnapshotter(scraper.CrawlLimits()).snapshot(source)
+
+    assert resolved == revision
+    assert not warnings
+    assert [item.relative_path for item in documents] == [
+        "packages/SettingsProvider/src/SettingsProvider.java"
+    ]
+    assert any("--no-checkout" in command for command in commands)
+    assert any(command[-2:] == ["--cone", "packages/SettingsProvider"] for command in commands)

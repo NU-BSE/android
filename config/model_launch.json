@@ -1,0 +1,114 @@
+{
+  "schema_version": 1,
+  "paths": {
+    "ollama_config": "ollama_models.json",
+    "distillation_config": "distillation.json",
+    "source_registry": "document_sources.json",
+    "emulator_matrix": "emulator_matrix.json"
+  },
+  "settings": {
+    "require_all_os_settings": true,
+    "max_evidence_tier": 2
+  },
+  "os_families": {
+    "android-aosp": {
+      "distillation_mode": "required",
+      "profile_ids": [
+        "aosp10-low-phone",
+        "aosp12l-mid-resizable",
+        "aosp14-main-phone",
+        "aosp15-high-phone",
+        "aosp16-tablet",
+        "aosp17-foldable"
+      ],
+      "max_settings_context": 48,
+      "qwen3_vl": {
+        "keep_alive": "45m",
+        "num_ctx": 32768,
+        "temperature": 0.0,
+        "top_p": 1.0
+      },
+      "ui_tars": {
+        "keep_alive": "45m",
+        "num_ctx": 16384,
+        "temperature": 0.0,
+        "top_p": 1.0
+      },
+      "on_policy": {
+        "rollout_batch_size": 16,
+        "max_steps_per_task": 12,
+        "min_teacher_confidence": 0.65,
+        "seed": 0
+      }
+    },
+    "grapheneos": {
+      "distillation_mode": "required",
+      "profile_ids": ["grapheneos17-sdk-phone64"],
+      "max_settings_context": 32,
+      "qwen3_vl": {
+        "keep_alive": "30m",
+        "num_ctx": 32768,
+        "temperature": 0.0,
+        "top_p": 1.0
+      },
+      "ui_tars": {
+        "keep_alive": "30m",
+        "num_ctx": 16384,
+        "temperature": 0.0,
+        "top_p": 1.0
+      },
+      "on_policy": {
+        "rollout_batch_size": 8,
+        "max_steps_per_task": 10,
+        "min_teacher_confidence": 0.75,
+        "seed": 17
+      }
+    },
+    "calyxos": {
+      "distillation_mode": "required",
+      "profile_ids": ["calyxos-emulator-current"],
+      "max_settings_context": 32,
+      "qwen3_vl": {
+        "keep_alive": "30m",
+        "num_ctx": 32768,
+        "temperature": 0.0,
+        "top_p": 1.0
+      },
+      "ui_tars": {
+        "keep_alive": "30m",
+        "num_ctx": 16384,
+        "temperature": 0.0,
+        "top_p": 1.0
+      },
+      "on_policy": {
+        "rollout_batch_size": 8,
+        "max_steps_per_task": 10,
+        "min_teacher_confidence": 0.72,
+        "seed": 16
+      }
+    },
+    "eos": {
+      "distillation_mode": "required",
+      "profile_ids": ["eos13-nexus5x-emulator"],
+      "max_settings_context": 32,
+      "qwen3_vl": {
+        "keep_alive": "30m",
+        "num_ctx": 24576,
+        "temperature": 0.0,
+        "top_p": 1.0
+      },
+      "ui_tars": {
+        "keep_alive": "30m",
+        "num_ctx": 12288,
+        "temperature": 0.0,
+        "top_p": 1.0
+      },
+      "on_policy": {
+        "rollout_batch_size": 8,
+        "max_steps_per_task": 10,
+        "min_teacher_confidence": 0.7,
+        "seed": 13
+      }
+    }
+  }
+}

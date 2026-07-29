@@ -123,12 +123,26 @@ class StaleSourceError(ScrapeError):
     """Raised when a source revision changed under a stale-source gate."""
 
 
+def normalize_repository_subpath(value: object) -> str | None:
+    """Return a safe repository-relative POSIX directory path."""
+    if value is None:
+        return None
+    raw = str(value).strip().replace("\\", "/")
+    if not raw:
+        return None
+    parts = raw.split("/")
+    if raw.startswith("/") or "\x00" in raw or any(part in {"", ".", ".."} for part in parts):
+        raise ValueError("repository_subpath must be a normalized repository-relative path")
+    return "/".join(parts)
+
+
 @dataclass(frozen=True)
 class SourceSpec:
     source_key: str
     os_family: str
     root_url: str
     repository_url: str | None
+    repository_subpath: str | None
     confidence_tier: int
     license_identifier: str
     discovery_mode: str
@@ -145,6 +159,7 @@ class SourceSpec:
             os_family=str(raw.get("os_family") or ""),
             root_url=str(raw.get("root_url") or ""),
             repository_url=str(raw["repository_url"]) if raw.get("repository_url") else None,
+            repository_subpath=normalize_repository_subpath(raw.get("repository_subpath")),
             confidence_tier=int(raw.get("confidence_tier", 1)),
             license_identifier=str(raw.get("license_identifier") or ""),
             discovery_mode=str(raw.get("discovery_mode") or "official_index"),
@@ -449,14 +464,37 @@ class GitSnapshotter:
                 "1",
                 "--filter=blob:none",
                 "--no-tags",
-                repository,
-                str(checkout),
             ]
+            if source.repository_subpath:
+                command.append("--no-checkout")
+            command.extend((repository, str(checkout)))
             self._run(command, timeout=max(60.0, self.limits.request_timeout * 3))
+            if source.repository_subpath:
+                self._run(["git", "-C", str(checkout), "sparse-checkout", "init", "--cone"])
+                self._run(
+                    [
+                        "git",
+                        "-C",
+                        str(checkout),
+                        "sparse-checkout",
+                        "set",
+                        "--cone",
+                        source.repository_subpath,
+                    ]
+                )
+                self._run(
+                    ["git", "-C", str(checkout), "checkout", "--quiet", "--detach", revision],
+                    timeout=max(60.0, self.limits.request_timeout * 3),
+                )
             actual = self._run(["git", "-C", str(checkout), "rev-parse", "HEAD"]).strip()
             if actual != revision:
                 revision = actual
-            candidates = [path for path in checkout.rglob("*") if self._eligible(path, checkout)]
+            scan_root = checkout / source.repository_subpath if source.repository_subpath else checkout
+            if not scan_root.is_dir():
+                raise SourceUnavailableError(
+                    f"repository subpath does not exist at {revision}: {source.repository_subpath}"
+                )
+            candidates = [path for path in scan_root.rglob("*") if self._eligible(path, checkout)]
             candidates.sort(key=lambda path: (not self._relevant(path, checkout), str(path.relative_to(checkout))))
             documents: list[RawDocument] = []
             for path in candidates[: self.limits.max_pages_per_source]:
