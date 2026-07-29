@@ -37,6 +37,11 @@ from .emulator_lab import (
     EmulatorMatrix, EmulatorProfile, FormFactor, load_emulator_matrix,
     selected_emulator_matrix,
 )
+from .emulator_runtime import (
+    AdbClient, BootStatus, CommandResult, EmulatorBootError,
+    EmulatorBootTimeout, EmulatorExitedError, EmulatorLauncher, EmulatorLease,
+    serial_for_port,
+)
 from .model import AndroidDRLQN, AndroidDRLQNConfig
 from .ollama_runtime import (
     GROUNDING_SCHEMA, JUDGEMENT_SCHEMA, OllamaChatModel, OllamaClient,
