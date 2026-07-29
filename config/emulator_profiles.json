@@ -1,0 +1,53 @@
+{
+  "//": "Ordered AVD profiles. The run boots them one at a time, in this order.",
+  "profiles": [
+    {
+      "name": "android12-stock-1080p",
+      "avd_name": "drlqn_api31_1080p",
+      "android_version": 12,
+      "os_family": "aosp",
+      "os_release": "12",
+      "manufacturer": "Google",
+      "model": "sdk_gphone64_x86_64",
+      "width_px": 1080,
+      "height_px": 1920,
+      "density": 2.75,
+      "ram_gb": 4.0,
+      "serial": "emulator-5554",
+      "launch_component": "com.android.settings/.Settings",
+      "notes": ["oldest supported wording; run first so later profiles refine it"]
+    },
+    {
+      "name": "android15-stock-1080p",
+      "avd_name": "drlqn_api35_1080p",
+      "android_version": 15,
+      "os_family": "aosp",
+      "os_release": "15",
+      "manufacturer": "Google",
+      "model": "sdk_gphone64_x86_64",
+      "width_px": 1080,
+      "height_px": 2400,
+      "density": 2.75,
+      "ram_gb": 6.0,
+      "serial": "emulator-5556",
+      "launch_component": "com.android.settings/.Settings"
+    },
+    {
+      "name": "android16-tablet-1600p",
+      "avd_name": "drlqn_api36_tablet",
+      "android_version": 16,
+      "os_family": "aosp",
+      "os_release": "16",
+      "manufacturer": "Google",
+      "model": "sdk_gphone64_tablet",
+      "width_px": 1600,
+      "height_px": 2560,
+      "density": 2.0,
+      "ram_gb": 8.0,
+      "cpu_big_cores": 4,
+      "serial": "emulator-5558",
+      "launch_component": "com.android.settings/.Settings",
+      "notes": ["different aspect ratio and two-pane Settings layout"]
+    }
+  ]
+}

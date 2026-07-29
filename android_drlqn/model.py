@@ -17,6 +17,7 @@ from .core import (
     META_DIM,
     TEXT_TOKEN_DIM,
 )
+from .core import GestureType
 from .window_graph import SubgoalType
 
 
@@ -69,9 +70,10 @@ class AndroidDRLQNConfig:
     fusion_blocks: int = 2
     history: int = 8
     max_nodes: int = 96
+    vision_grid: int = 8
     heatmap_size: int = 16
     planner_args: int = 32
-    gesture_types: int = 9
+    gesture_types: int = len(GestureType)
     max_fingers: int = 4
     control_points: int = 4
     verifier_labels: int = 6
@@ -81,6 +83,19 @@ class AndroidDRLQNConfig:
             raise ValueError("history must be in [3, 8]")
         if self.d_model % self.heads:
             raise ValueError("d_model must be divisible by heads")
+        if self.vision_grid < 1:
+            raise ValueError("vision_grid must be positive")
+        if self.gesture_types != len(GestureType):
+            raise ValueError(
+                f"gesture_types must match GestureType ({len(GestureType)} members)"
+            )
+
+    @classmethod
+    def for_batch(cls, batch_config, **overrides) -> "AndroidDRLQNConfig":
+        """Build a model config that matches an ``AndroidBatchConfig`` exactly."""
+        overrides.setdefault("history", batch_config.history)
+        overrides.setdefault("max_nodes", batch_config.max_nodes)
+        return cls(**overrides)
 
 
 class AndroidDRLQN(Module):
@@ -130,16 +145,35 @@ class AndroidDRLQN(Module):
         self.lambda_delta = MLP([2 * width, width, width], rng)
 
     def _vision_tokens(self, screenshots: np.ndarray) -> T:
-        batch, history = screenshots.shape[:2]
-        # 64x64 screenshots -> 8x8 grid of RGB patch means.
-        patches = screenshots.reshape(batch, history, 8, 8, 8, 8, 3).mean(axis=(3, 5))
-        return self.vision_projection(T(patches.reshape(batch * history, 64, 3)))
+        batch, history, height, width = screenshots.shape[:4]
+        grid = self.cfg.vision_grid
+        if height != width or height % grid:
+            raise ValueError(
+                f"screenshots must be square and divisible by vision_grid={grid}, "
+                f"got {height}x{width}"
+            )
+        # Square screenshots -> grid x grid of RGB patch means.
+        side = height // grid
+        patches = screenshots.reshape(batch, history, grid, side, grid, side, 3).mean(axis=(3, 5))
+        return self.vision_projection(
+            T(patches.reshape(batch * history, grid * grid, 3))
+        )
 
     def _encode_frames(self, batch: dict[str, np.ndarray]):
         width = self.cfg.d_model
         screenshots = batch["screenshots"]
         batch_size, history = screenshots.shape[:2]
         flat_batch = batch_size * history
+        if history != self.cfg.history:
+            raise ValueError(
+                f"batch history {history} does not match model history {self.cfg.history}; "
+                "build the batch config with AndroidDRLQNConfig.for_batch()"
+            )
+        if batch["node_features"].shape[2] > self.cfg.max_nodes:
+            raise ValueError(
+                f"batch carries {batch['node_features'].shape[2]} nodes, "
+                f"model max_nodes is {self.cfg.max_nodes}"
+            )
 
         vision = self._vision_tokens(screenshots) + self.modality_embeddings[0].reshape(1, 1, width)
         nodes = self.node_projection(

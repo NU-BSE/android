@@ -190,6 +190,11 @@ quality.
 
 ## Recommended offline adaptation dataset
 
+For visual grounding, prefer the on-policy loop in
+[on_policy_distillation.md](on_policy_distillation.md): it supervises states the
+student actually reaches. The offline set below stays the right shape for the
+*chat* advisor, which has no emulator rollout.
+
 Train or distill the local LLM on one-step records:
 
 ```json

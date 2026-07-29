@@ -206,7 +206,7 @@ class PlannerAdvisor:
         try:
             prompt = self.build_messages(subgoal, state, user_goal)
             raw = llm.generate(prompt, self.config.generation)
-            step = self._parse_llm_step(raw, deterministic)
+            step = self._parse_llm_step(raw, deterministic, state)
         except (ValueError, TypeError, json.JSONDecodeError, AdvisorPolicyError):
             # A malformed or unsafe local-model response must degrade to a
             # deterministic instruction rather than crossing the policy boundary.
@@ -407,7 +407,12 @@ class PlannerAdvisor:
         return ("Review the current screen and perform the next clear step manually.",
                 "The screen should match the expected result.", "Can we continue?", None)
 
-    def _parse_llm_step(self, raw: str, fallback: UserActionStep) -> UserActionStep:
+    def _parse_llm_step(
+        self,
+        raw: str,
+        fallback: UserActionStep,
+        state: AndroidState,
+    ) -> UserActionStep:
         payload = json.loads(self._extract_json(raw))
         required = ("instruction", "expected_result", "confirmation_question")
         if any(not isinstance(payload.get(key), str) or not payload[key].strip() for key in required):
@@ -420,7 +425,14 @@ class PlannerAdvisor:
         if re.search(r"\b(?:x|y)\s*[:=]\s*\d", normalized):
             raise AdvisorPolicyError("coordinate-like output is not allowed")
 
-        visible = {label.casefold() for label in self._visible_labels_from_fallback(fallback)}
+        # The model saw redacted labels, so accept either form before falling back.
+        visible: set[str] = set()
+        for label in self._visible_labels(state):
+            visible.add(label.casefold())
+            if self.config.redact_sensitive_text:
+                visible.add(SensitiveTextRedactor.redact(label).casefold())
+        if fallback.target_label:
+            visible.add(fallback.target_label.casefold())
         target = payload.get("target_label")
         if target is not None:
             if not isinstance(target, str):
@@ -439,10 +451,6 @@ class PlannerAdvisor:
             caution=(payload.get("caution") or fallback.caution),
             generated_by_llm=True,
         )
-
-    @staticmethod
-    def _visible_labels_from_fallback(fallback: UserActionStep) -> tuple[str, ...]:
-        return (fallback.target_label,) if fallback.target_label else ()
 
     @staticmethod
     def _extract_json(raw: str) -> str:

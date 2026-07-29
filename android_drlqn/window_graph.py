@@ -5,7 +5,6 @@ import hashlib
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Callable
 
 from .core import AndroidState, GestureAction, tree_fingerprint
 

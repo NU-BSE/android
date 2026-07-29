@@ -1,0 +1,25 @@
+{
+  "//": "Each task is an ordered list of semantic targets. The student grounds them itself; the teacher only labels the states the student reaches.",
+  "tasks": [
+    {
+      "goal": "Открыть настройки Bluetooth",
+      "targets": ["Connected devices", "Connection preferences", "Bluetooth"],
+      "max_attempts_per_target": 3
+    },
+    {
+      "goal": "Открыть раздел конфиденциальности",
+      "targets": ["Security & privacy", "Privacy"],
+      "max_attempts_per_target": 3
+    },
+    {
+      "goal": "Открыть настройки уведомлений приложений",
+      "targets": ["Notifications", "App notifications"],
+      "max_attempts_per_target": 3
+    },
+    {
+      "goal": "Открыть настройки хранилища",
+      "targets": ["Storage"],
+      "max_attempts_per_target": 2
+    }
+  ]
+}

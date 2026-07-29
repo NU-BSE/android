@@ -1,13 +1,13 @@
 """Minimal reverse-mode autodiff engine over numpy arrays.
 
-PyPI (and therefore PyTorch) is unreachable from this sandbox, so DRLQN v0
-uses this ~250-line engine instead of torch. It supports everything the
-DRLQN-S model needs: matmul, broadcast add/mul, relu/tanh/sigmoid, exp/log,
-softmax, reductions, reshape/transpose/concat/slicing and row gather.
+The package depends only on numpy, so DRLQN uses this small engine instead of
+torch. It supports everything the model needs: matmul, broadcast add/mul,
+relu/tanh/sigmoid, exp/log, softmax, reductions, reshape/transpose/concat/
+slicing and row gather, plus an Adam optimizer with global grad-norm clipping.
 
-Forward-mode (JVP) for the lambda-executor is hand written in
-`drlqn/runtime/jvp.py` because the executor graph is small and fixed
-(the spec's torch.func.jvp path, replaced by an exact equivalent).
+The differential residual lambda update (`AndroidDRLQN.lambda_update`) is an
+ordinary reverse-mode path here; there is no separate forward-mode module.
+Huber lives in `losses.py` so that every objective shares one definition.
 """
 from __future__ import annotations
 
@@ -378,17 +378,3 @@ class Adam:
             mh = self.m[i] / (1 - self.b1 ** self.t)
             vh = self.v[i] / (1 - self.b2 ** self.t)
             p.data -= self.lr * mh / (np.sqrt(vh) + self.eps)
-
-
-def huber(x: T, delta: float = 1.0) -> T:
-    """Elementwise Huber of residual x, returns mean scalar."""
-    a = np.abs(x.data)
-    quad = a <= delta
-    # value = 0.5 x^2 (quad) ; delta*(|x|-0.5 delta) (lin)
-    out = T(np.where(quad, 0.5 * x.data ** 2, delta * (a - 0.5 * delta)), (x,))
-
-    def bw(g):
-        return (g * np.where(quad, x.data, delta * np.sign(x.data)),)
-
-    out._backward = bw
-    return out.mean()

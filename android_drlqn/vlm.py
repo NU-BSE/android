@@ -90,7 +90,10 @@ class VLMRequest:
     screen_description: str
     visible_elements: tuple[VisibleElement, ...]
     locale: str = "ru"
-    max_new_tokens: int = 96
+    # The contract carries label, role, four box floats, confidence and a short
+    # explanation. Below ~160 tokens the JSON is truncated mid-object and every
+    # answer is rejected as a contract violation.
+    max_new_tokens: int = 256
 
 
 class LocalVisionLanguageModel(Protocol):
@@ -194,6 +197,13 @@ class GrounderConfig:
     vlm_threshold: float = 0.60
     max_visible_elements: int = 64
     redact_sensitive_text: bool = True
+    vlm_max_new_tokens: int = 256
+
+    def __post_init__(self) -> None:
+        if self.vlm_max_new_tokens < 160:
+            raise ValueError(
+                "vlm_max_new_tokens below 160 truncates the grounding JSON contract"
+            )
 
 
 class VLMContractError(ValueError):
@@ -249,12 +259,7 @@ class HybridGrounder:
             best = max((accessibility, drlqn), key=lambda item: item.confidence)
             return best if best.confidence > 0 else GroundingDecision(GroundingSource.NONE, 0.0)
 
-        request = VLMRequest(
-            image=np.asarray(state.screenshot.pixels),
-            target=self._redact(target),
-            screen_description=self._screen_description(state),
-            visible_elements=elements,
-        )
+        request = self.build_request(state, target, elements=elements)
         try:
             decision = self.parse_vlm_response(vlm.ground(request))
         except (TypeError, ValueError, json.JSONDecodeError, VLMContractError):
@@ -268,6 +273,25 @@ class HybridGrounder:
                 model_metadata=decision.model_metadata,
             )
         return decision
+
+    def build_request(
+        self,
+        state: AndroidState,
+        target: str,
+        *,
+        elements: Sequence[VisibleElement] | None = None,
+        max_new_tokens: int | None = None,
+    ) -> VLMRequest:
+        """Assemble exactly what a local VLM is allowed to see for one target."""
+        return VLMRequest(
+            image=np.asarray(state.screenshot.pixels),
+            target=self._redact(target),
+            screen_description=self._screen_description(state),
+            visible_elements=tuple(
+                self.visible_elements(state) if elements is None else elements
+            ),
+            max_new_tokens=max_new_tokens or self.config.vlm_max_new_tokens,
+        )
 
     def visible_elements(self, state: AndroidState) -> tuple[VisibleElement, ...]:
         output: list[VisibleElement] = []

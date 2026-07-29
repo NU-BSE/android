@@ -1,5 +1,0 @@
-FROM avil/UI-TARS:latest
-PARAMETER temperature 0
-PARAMETER top_p 1
-PARAMETER num_ctx 16384
-PARAMETER num_predict 160

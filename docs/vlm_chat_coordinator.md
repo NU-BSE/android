@@ -3,7 +3,7 @@
 The coordinator joins four independently testable components:
 
 1. **ORM catalog** resolves a setting only for the exact OS/release/API/device scope.
-2. **DRLQN perception** ranks accessibility nodes and may expose a box/heatmap through `PerceptionDRLQN`; gesture heads remain filtered.
+2. **DRLQN perception** ranks accessibility nodes and may expose a box/heatmap through `PerceptionDRLQN`; gesture heads remain filtered. The coordinator itself does not run the model: the host passes the resulting ranking in as `drlqn_node_scores`.
 3. **Local VLM** receives the screenshot, one semantic target and a minimized list of visible UI elements. It returns strict JSON with one normalized bounding box.
 4. **Local chat LLM** explains exactly one semantic action through `PlannerAdvisor` and never receives executable commands or raw gesture trajectories.
 
@@ -62,6 +62,8 @@ It must return only:
 ```
 
 Unknown fields, invalid boxes, low confidence and executable text are rejected. Accessibility matching remains the first choice; DRLQN ranking is second; the VLM is the fallback.
+
+The contract needs room to be emitted: `GrounderConfig.vlm_max_new_tokens` must stay at or above 160, otherwise the object is truncated mid-JSON and every answer is rejected as malformed. Runtime-specific dialects (a 0-1000 box scale, stray keys, a fenced block) belong in the adapter — see `android_drlqn.ollama.normalize_grounding_payload` — never in this contract.
 
 ## Chat LLM adapter
 
