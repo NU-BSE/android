@@ -166,6 +166,14 @@ python scripts/train_on_policy_ollama.py \
   --environment-plugin project_lab:create_environment
 ```
 
+The shipped plugins are reviewed reference implementations: `project_train`
+distills a Qwen2.5-1.5B-Instruct student with the lora-speedrun record recipe
+(LoRA r=16/alpha=32 on all seven projections, packed full blocks, chunked
+completion-only CE, 1-epoch-style cosine schedule), and `project_lab` drives an
+emulator over adb with screenshot/uiautomator observations and gated input
+injection (`ANDROID_DRLQN_ALLOW_EMULATOR_INPUT=1`, emulator-only). See
+[docs/on_policy_distillation.md](docs/on_policy_distillation.md#shipped-project-plugins).
+
 See [docs/on_policy_distillation.md](docs/on_policy_distillation.md), [docs/ollama_local_models.md](docs/ollama_local_models.md) and [examples/on_policy_distillation.py](examples/on_policy_distillation.py).
 
 ## One-step advisor
@@ -234,3 +242,4 @@ python scripts/collect_android.py --output data/session-001 --serial DEVICE_SERI
 ```
 
 Training data must be joined by timestamps, not file order. Production mode should minimize and redact UI text and must not use the collector as an autonomous action executor.
+
