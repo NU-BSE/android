@@ -5,8 +5,12 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import sys
 import urllib.request
 from pathlib import Path
+
+# Allow repo-root plugin modules (project_train/project_lab) when run as a script.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from android_drlqn.distillation import (
     DistillationRunManifest,
@@ -175,3 +179,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
