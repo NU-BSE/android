@@ -7,9 +7,13 @@ import hashlib
 import importlib
 import inspect
 import json
+import sys
 from dataclasses import asdict
 from pathlib import Path
 from typing import Callable, Mapping
+
+# Allow repo-root plugin modules (project_train/project_lab) when run as a script.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from android_drlqn.distillation import (
     DistillationMetrics,
@@ -238,3 +242,4 @@ def _block_tasks(
 
 if __name__ == "__main__":
     main()
+
