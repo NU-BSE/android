@@ -134,6 +134,59 @@ supervised action CE
 + reference-policy KL
 ```
 
+## Shipped project plugins
+
+`project_train:create_student` and `project_lab:create_environment` are the
+reviewed reference implementations used by the documented commands.
+
+### `project_train` — Qwen2.5-1.5B-Instruct speedrun-LoRA student
+
+The student is the text-only `Qwen/Qwen2.5-1.5B-Instruct`. It reasons over the
+accessibility labels and the normalized OS-settings evidence embedded in the
+task (screenshots stay with the multimodal teacher) and emits one closed JSON
+action per step. The action distribution is the softmax over the six proposal
+kinds at the forced `"kind"` token position, so every proposal carries a real,
+normalized distribution and log-probability.
+
+The updater reproduces the lora-speedrun Track-1 record
+(`submissions/003-pmigdal`, 1m 44s to 60.3% GSM8K on Qwen2.5-1.5B):
+
+- LoRA r=16, alpha=32, dropout=0.0 on all seven linear projections
+  (18,464,768 adapter parameters);
+- AdamW (fused on CUDA), betas (0.9, 0.95), no weight decay, LR 4e-4, 8-step
+  warmup, cosine decay to 5%;
+- greedy packing of teacher completions into full fixed-length blocks that are
+  moved to the device once (no dataloader, no collation, no attention mask);
+- completion-only cross-entropy via a chunked custom autograd function, so the
+  full fp32 logits tensor is never materialized.
+
+The repository loss terms map onto the text-only student as follows: the
+supervised action CE and the advantage-weighted policy term read logits at the
+kind-token position; box supervision is the cross-entropy over the teacher
+`bbox_norm` token span; the language term covers the whole teacher completion;
+the reference-policy KL compares against the frozen base model with LoRA
+adapters disabled. Samples whose teacher judgement has `should_update=false`
+(e.g. teacher/critic disagreement) never move weights.
+
+Optional `student_config` keys: `model_id`, `device`, `dtype`,
+`max_new_tokens`, `seed`, `lora` and `speedrun` overrides.
+
+### `project_lab` — adb emulator environment
+
+The environment attaches to a running emulator (or boots a matching AVD with
+`ANDROID_DRLQN_LAB_AUTOBOOT=1`), launches the Settings app and captures
+timestamp-aligned observations: a PNG screenshot under
+`artifacts/lab-screenshots` (inside the teacher's allowed image roots) and the
+uiautomator hierarchy for labels, bounds and the accessibility summary.
+
+Safety contract mirrors `AdbResearchActuator`: input injection requires
+`ANDROID_DRLQN_ALLOW_EMULATOR_INPUT=1` and a positive emulator check
+(`ro.kernel.qemu` / build characteristics). Taps resolve from the proposal's
+`bbox_norm` (times the live display size) or from the target label's
+uiautomator bounds. A transition is verified when the task's expected setting
+label is visible after the action; language turns (`explain` /
+`ask_confirmation`) are terminal on-device and left to the teacher to score.
+
 ## Commands
 
 Dry-run the curriculum and matrix without loading a teacher:
@@ -162,3 +215,4 @@ python scripts/check_document_coverage.py artifacts/distillation/coverage.json
 
 A release must not claim documentation completeness unless this gate passes for
 the exact pinned revisions and selected emulator artifacts.
+
