@@ -50,3 +50,13 @@ materialized. For AOSP SettingsProvider this is:
   "repository_subpath": "packages/SettingsProvider"
 }
 ```
+
+
+## Source-class detection
+
+Required classes remain fail-closed. The normalizer recognizes Android Settings
+API permission boundaries, Settings resource XML (`res/xml`, `res/values`, and
+overlays), and emulator/AVD documentation as device-support evidence. CalyxOS
+Settings source coverage is taken from the official
+`CalyxOS/platform_packages_apps_Settings` repository rather than the GitLab group
+or manifest repository.

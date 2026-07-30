@@ -617,25 +617,90 @@ def text_blocks(document: RawDocument) -> tuple[TextBlock, ...]:
 
 
 def infer_document_classes(document: RawDocument, blocks: Sequence[TextBlock]) -> tuple[str, ...]:
-    sample = " ".join((document.canonical_url, document.relative_path or "", *(block.text[:400] for block in blocks[:20]))).lower()
+    canonical = document.canonical_url.lower()
+    relative = (document.relative_path or "").lower().replace("\\", "/")
+    sample = " ".join((canonical, relative, *(block.text[:800] for block in blocks[:40]))).lower()
     classes: set[str] = set()
-    if any(token in sample for token in ("/reference/", " api ", "settings.provider", "provider/settings")):
+
+    android_settings_contract = any(
+        token in sample
+        for token in (
+            "/reference/android/provider/settings",
+            "android.provider.settings",
+            "provider/settings",
+            "settings.provider",
+        )
+    )
+    if any(token in sample for token in ("/reference/", " api ")) or android_settings_contract:
         classes.add("api_reference")
-    if any(token in sample for token in ("permission", "security", "privacy", "encryption")):
+
+    # Android's Settings provider/API is itself a permission and security
+    # boundary even when the rendered reference shell omits permission prose.
+    if android_settings_contract or any(
+        token in sample
+        for token in (
+            "permission",
+            "requires permission",
+            "security",
+            "privacy",
+            "encryption",
+            "app op",
+            "write_settings",
+            "read_device_config",
+        )
+    ):
         classes.add("permission_security")
-    if document.canonical_url.startswith("git+") or (document.relative_path and Path(document.relative_path).suffix.lower() in {".kt", ".java", ".c", ".cpp", ".py"}):
+
+    if document.canonical_url.startswith("git+") or (
+        document.relative_path
+        and Path(document.relative_path).suffix.lower() in {".kt", ".java", ".c", ".cc", ".cpp", ".h", ".py", ".xml"}
+    ):
         classes.add("source_code")
-    if any(token in sample for token in ("setting", "preferences", "toggle", "switch")):
+
+    settings_resource = bool(
+        relative
+        and (
+            re.search(r"(^|/)(res|res-product|res-export)/(xml|values|menu|navigation)(/|$)", relative)
+            or "/overlay" in relative
+            or relative.startswith("overlay")
+            or relative.endswith(("preferences.xml", "settings.xml", "config.xml"))
+        )
+    )
+    if any(token in sample for token in ("setting", "preference", "toggle", "switch")):
         classes.add("settings_ui_path")
-    if any(token in sample for token in ("overlay", "res/values", "config.xml", "resource")):
+    if settings_resource or any(
+        token in sample
+        for token in ("resource overlay", "runtime resource overlay", " rro ", "res/values", "res/xml", "config.xml")
+    ):
         classes.add("resource_overlay")
+
     if any(token in sample for token in ("guide", "how-to", "how to", "documentation", "docs/")):
         classes.add("user_guide")
     if any(token in sample for token in ("release note", "changelog", "what's new", "whats-new")):
         classes.add("release_notes")
-    if any(token in sample for token in ("supported device", "device support", "compatibility", "requirements")):
+
+    emulator_support = any(
+        token in sample
+        for token in (
+            "/how-to/emulator",
+            " emulator image",
+            "android emulator",
+            "virtual device",
+            "avd manager",
+            "create virtual device",
+            "system-images/android-",
+            "system image",
+            "android api",
+            "nexus 5x",
+            "sdk_phone",
+        )
+    )
+    if emulator_support or any(
+        token in sample
+        for token in ("supported device", "device support", "compatibility", "hardware requirements")
+    ):
         classes.add("device_support")
-    if any(token in sample for token in ("license", "copyright", "legal")):
+    if any(token in sample for token in ("license", "copyright", "legal", "cc by-sa", "apache license")):
         classes.add("legal_license")
     if any(token in sample for token in ("enterprise", "device owner", "administrator", "policy")):
         classes.add("enterprise_policy")
@@ -658,7 +723,10 @@ def normalize_document(source: SourceSpec, document: RawDocument) -> dict[str, o
         section_id = stable_id(document.canonical_url, "/".join(heading_path), str(ordinal))
         claim_indexes: list[int] = []
         path = extract_ui_path(combined)
-        actionable = bool(path or (ACTION_WORDS.search(combined) and SETTING_SIGNALS.search(combined))) and bool(heading or combined)
+        # A setting_variant is UI-groundable only when the source contains an explicit path.
+        # Descriptive settings prose without a path remains evidence, but is not emitted
+        # as a claim that downstream curriculum code could mistake for a visible target.
+        actionable = bool(path) and bool(heading or combined)
         if actionable:
             display_name = clean_text(heading or (path[-1] if path else combined[:100]))[:160]
             if display_name:

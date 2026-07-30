@@ -246,3 +246,44 @@ def test_git_snapshotter_uses_sparse_checkout_for_repository_subpath(tmp_path, m
     ]
     assert any("--no-checkout" in command for command in commands)
     assert any(command[-2:] == ["--cone", "packages/SettingsProvider"] for command in commands)
+
+
+
+def test_android_settings_reference_counts_as_permission_security():
+    document = scraper.RawDocument(
+        "android_settings_api",
+        "android-aosp",
+        "https://developer.android.com/reference/android/provider/Settings",
+        b"<html><h1>Settings</h1><p>Constants and nested classes.</p></html>",
+        "text/html",
+    )
+    classes = set(scraper.infer_document_classes(document, scraper.text_blocks(document)))
+    assert {"api_reference", "permission_security"}.issubset(classes)
+
+
+def test_calyx_settings_resource_xml_covers_required_source_classes():
+    document = scraper.RawDocument(
+        "calyxos_platform_source",
+        "calyxos",
+        "git+https://gitlab.com/CalyxOS/platform_packages_apps_Settings@" + "a" * 40 + "#res/xml/privacy_settings.xml",
+        b'<PreferenceScreen><SwitchPreference android:key="privacy_toggle" /></PreferenceScreen>',
+        "application/xml",
+        relative_path="res/xml/privacy_settings.xml",
+    )
+    classes = set(scraper.infer_document_classes(document, scraper.text_blocks(document)))
+    assert {"source_code", "resource_overlay", "settings_ui_path"}.issubset(classes)
+
+
+def test_emulator_how_to_counts_as_device_support():
+    document = scraper.RawDocument(
+        "eos_emulator_docs",
+        "eos",
+        "https://doc.e.foundation/os/how-to/emulator",
+        (
+            b"<html><h1>/e/OS emulator</h1><p>Download the emulator image, open the AVD Manager, "
+            b"select Nexus 5X, choose the Android API system image, and create a virtual device.</p></html>"
+        ),
+        "text/html",
+    )
+    classes = set(scraper.infer_document_classes(document, scraper.text_blocks(document)))
+    assert {"device_support", "user_guide"}.issubset(classes)

@@ -316,7 +316,7 @@ class DocumentationCurriculumBuilder:
                 CurriculumTaskKind.PLAN_WORKFLOW: f"Build an evidence-backed workflow for {display}.",
                 CurriculumTaskKind.EXPLAIN_SETTING: f"Explain one safe next user step for {display}.",
                 CurriculumTaskKind.VERIFY_TRANSITION: f"Verify the UI transition for {display} from an action receipt.",
-                CurriculumTaskKind.GROUND_UI: f"Ground the visible UI element labelled {ui_path[-1]!r}.",
+                CurriculumTaskKind.GROUND_UI: f"Ground the visible UI element labelled {(ui_path[-1] if ui_path else 'Settings')!r}.",
             }
             output.append(CurriculumTask(task_id, section.coverage_id, source.source_key, source.os_family, section.snapshot_sha256, section.section_id, kind, prompts[kind], expected, evidence, setting_id, str(claim.get("risk_level") or "medium"), dict(claim.get("scope") or {})))
         return output
