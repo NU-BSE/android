@@ -135,7 +135,7 @@ class OnPolicyConfig:
     rollout_batch_size: int = 16
     max_steps_per_task: int = 12
     updates_per_batch: int = 1
-    min_teacher_confidence: float = 0.65
+    min_teacher_confidence: float = 0.50
     gamma: float = 0.98
     advantage_clip: float = 2.0
     supervised_weight: float = 1.0

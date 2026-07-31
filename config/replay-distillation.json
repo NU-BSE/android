@@ -13,7 +13,6 @@
     "rollout_batch_size": 8,
     "max_steps_per_task": 8,
     "updates_per_batch": 1,
-    "min_teacher_confidence": 0.65,
     "gamma": 0.98,
     "advantage_clip": 2.0,
     "supervised_weight": 1.0,
