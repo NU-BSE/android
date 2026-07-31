@@ -39,6 +39,7 @@ invoked through the bounded, serial-scoped ``AdbClient``.
 from __future__ import annotations
 
 import atexit
+import hashlib
 import os
 import re
 import subprocess
@@ -69,11 +70,27 @@ ENV_SCREENSHOTS = "ANDROID_DRLQN_LAB_SCREENSHOTS"
 ENV_AUTOBOOT = "ANDROID_DRLQN_LAB_AUTOBOOT"
 ENV_ADB = "ANDROID_DRLQN_ADB"
 ENV_EMULATOR = "ANDROID_DRLQN_EMULATOR"
+ENV_MANUAL_NAVIGATION = "ANDROID_DRLQN_MANUAL_NAVIGATION_ONLY"
+
+_SEARCH_MARKERS = (
+    "search",
+    "search settings",
+    "settings search",
+    "поиск",
+    "поиск настроек",
+    "настройки поиска",
+)
 
 DEFAULT_SCREENSHOT_DIR = "artifacts/lab-screenshots"
 _MAX_IMAGE_BYTES = 20 * 1024 * 1024  # matches config/ollama_models.json
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
-_FOCUS_RE = re.compile(r"mCurrentFocus=\S+\s+\S+\s+([\w.]+)/([\w.$]+)")
+_FOCUS_PATTERNS = (
+    re.compile(r"mCurrentFocus=\S+\s+\S+\s+([\w.]+)/([\w.$]+)"),
+    re.compile(
+        r"(?:mFocusedApp|topResumedActivity)[^\n]*?(?:u\d+\s+)?"
+        r"([A-Za-z0-9_.]+)/([A-Za-z0-9_.$]+)"
+    ),
+)
 _BOUNDS_RE = re.compile(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]")
 _FIRST_PORT = 5554
 
@@ -161,11 +178,12 @@ def visible_labels(nodes: Sequence[UiNode], limit: int = 40) -> tuple[str, ...]:
 
 
 def parse_current_focus(dumpsys_window: str) -> tuple[str, str]:
-    """Extract ``(package, activity)`` from ``dumpsys window`` output."""
+    """Extract ``(package, activity)`` from common Android window formats."""
     for line in dumpsys_window.splitlines():
-        match = _FOCUS_RE.search(line)
-        if match:
-            return match.group(1), match.group(2)
+        for pattern in _FOCUS_PATTERNS:
+            match = pattern.search(line)
+            if match:
+                return match.group(1), match.group(2)
     return "", ""
 
 
@@ -196,6 +214,20 @@ def expected_labels(task: CurriculumTask) -> tuple[str, ...]:
     return tuple(dict.fromkeys(values))
 
 
+def _looks_like_settings_search_label(value: object) -> bool:
+    text = str(value or "").strip().casefold()
+    return bool(text) and any(marker in text for marker in _SEARCH_MARKERS)
+
+
+def _looks_like_settings_search_screen(
+    observation: RolloutObservation,
+) -> bool:
+    values = [
+        observation.activity,
+        *observation.visible_labels,
+    ]
+    return any(_looks_like_settings_search_label(value) for value in values)
+
 # ---------------------------------------------------------------------------
 # Environment
 # ---------------------------------------------------------------------------
@@ -220,25 +252,43 @@ class AdbSettingsEnvironment:
     _step_index: int = field(default=0, init=False)
     _nodes: tuple[UiNode, ...] = field(default=(), init=False)
     _verified: bool = field(default=False, init=False)
+    _last_observation: RolloutObservation | None = field(default=None, init=False)
 
     # -- EmulatorEnvironment protocol --------------------------------------
 
     def reset(self, task: CurriculumTask, profile: EmulatorProfile) -> RolloutObservation:
-        self._require_safe_target()
         self._task = task
         self._profile = profile
         self._step_index = 0
         self._verified = False
+        self._last_observation = None
+        self._require_safe_target()
         self._input("keyevent", "KEYCODE_WAKEUP")
-        self._shell("wm", "dismiss-keyguard")
-        self._shell("am", "start", "-a", "android.settings.SETTINGS")
+        self._shell_checked("wm", "dismiss-keyguard")
+
+        self._shell_checked(
+            "am",
+            "force-stop",
+            "com.android.settings",
+        )
+        self._shell_checked(
+            "am",
+            "start",
+            "-W",
+            "-a",
+            "android.settings.SETTINGS",
+        )
         time.sleep(max(self.settle_s, 1.5))
-        return self._observe()
+        observation = self._observe()
+        self._last_observation = observation
+        return observation
 
     def step(self, proposal: StudentProposal) -> EnvironmentOutcome:
-        if self._task is None:
+        if self._task is None or self._last_observation is None:
             raise LabEnvironmentError("reset() must be called before step()")
+        before = self._last_observation
         kind = proposal.kind
+        manual_navigation = os.environ.get(ENV_MANUAL_NAVIGATION, "1") == "1"
         if kind in (ProposalKind.EXPLAIN, ProposalKind.ASK_CONFIRMATION):
             return EnvironmentOutcome(
                 reward=0.0,
@@ -254,28 +304,73 @@ class AdbSettingsEnvironment:
         elif kind is ProposalKind.SCROLL:
             self._scroll()
         elif kind is ProposalKind.TAP:
+            if (
+                manual_navigation
+                and kind is ProposalKind.TAP
+                and _looks_like_settings_search_label(proposal.target_label)
+            ):
+                return EnvironmentOutcome(
+                    reward=-0.25,
+                    terminal=False,
+                    verified=False,
+                    next_observation=before,
+                    reason=(
+                        "Settings Search is forbidden; navigate through visible "
+                        "settings categories manually"
+                    ),
+                )
             point = self._resolve_tap(proposal)
             if point is None:
+                observation = self._observe()
+                self._last_observation = observation
                 return EnvironmentOutcome(
                     reward=-0.05,
                     terminal=False,
                     verified=False,
-                    next_observation=self._observe(),
+                    next_observation=observation,
                     reason="tap target could not be resolved on screen",
                 )
             self._input("tap", str(point[0]), str(point[1]))
         else:  # pragma: no cover - ProposalKind is exhaustive
-            return EnvironmentOutcome(-0.05, False, False, self._observe(), "unsupported action")
+            observation = self._observe()
+            self._last_observation = observation
+            return EnvironmentOutcome(
+                -0.05, False, False, observation, "unsupported action"
+            )
         time.sleep(self.settle_s)
         observation = self._observe()
-        verified = self._check_verified(observation)
+        self._last_observation = observation
+
+        if manual_navigation and _looks_like_settings_search_screen(observation):
+            self._input("keyevent", "KEYCODE_BACK")
+            time.sleep(self.settle_s)
+
+            recovered = self._observe()
+            self._last_observation = recovered
+
+            return EnvironmentOutcome(
+                reward=-0.25,
+                terminal=False,
+                verified=False,
+                next_observation=recovered,
+                reason=(
+                    "Settings Search was opened; action reverted because "
+                    "manual navigation is required"
+                ),
+            )
+
+        verified = self._check_verified(observation, kind, before)
         reward = 1.0 if verified else 0.0
         return EnvironmentOutcome(
             reward=reward,
             terminal=verified,
             verified=verified,
             next_observation=None if verified else observation,
-            reason="expected setting verified on screen" if verified else "transition unverified",
+            reason=(
+                "expected setting verified after a UI transition"
+                if verified
+                else "transition unverified"
+            ),
         )
 
     # -- internals ----------------------------------------------------------
@@ -291,6 +386,18 @@ class AdbSettingsEnvironment:
                 "input injection requires allow_input=True or "
                 f"{ENV_ALLOW_INPUT}=1 (emulator-only research actuator)"
             )
+        if self._profile is not None:
+            sdk = self.adb.run(
+                self.serial,
+                ("shell", "getprop", "ro.build.version.sdk"),
+                timeout_s=5.0,
+            )
+            actual = sdk.stdout.strip() if sdk.returncode == 0 else ""
+            if actual.isdigit() and int(actual) != int(self._profile.api_level):
+                raise LabEnvironmentError(
+                    f"{self.serial}: API {actual} does not match profile "
+                    f"{self._profile.profile_id} API {self._profile.api_level}"
+                )
 
     def _observe(self) -> RolloutObservation:
         self._step_index += 1
@@ -327,8 +434,10 @@ class AdbSettingsEnvironment:
             )
         directory = self.screenshots_dir / (self._profile.profile_id if self._profile else "unknown")
         directory.mkdir(parents=True, exist_ok=True)
-        task_id = (self._task.task_id if self._task else "task")[:12]
-        path = directory / f"{task_id}-s{index:02d}.png"
+        task_id = self._task.task_id if self._task else "task"
+        safe_task = re.sub(r"[^A-Za-z0-9_.-]+", "-", task_id).strip("-")[:48] or "task"
+        task_hash = hashlib.sha256(task_id.encode("utf-8")).hexdigest()[:8]
+        path = directory / f"{safe_task}-{task_hash}-s{index:02d}.png"
         path.write_bytes(payload)
         return path.as_posix()
 
@@ -382,23 +491,62 @@ class AdbSettingsEnvironment:
             return (1080, 2400)
         return int(match.group(1)), int(match.group(2))
 
-    def _check_verified(self, observation: RolloutObservation) -> bool:
+    def _check_verified(
+        self,
+        observation: RolloutObservation,
+        kind: ProposalKind,
+        before: RolloutObservation,
+    ) -> bool:
         if self._verified or self._task is None:
             return self._verified
         expected = expected_labels(self._task)
-        self._verified = any(
+        after_match = any(
             label_matches(value, observation.visible_labels) for value in expected
+        )
+        if not after_match:
+            return False
+        before_match = any(
+            label_matches(value, before.visible_labels) for value in expected
+        )
+        focus_changed = (
+            observation.package,
+            observation.activity,
+        ) != (before.package, before.activity)
+        labels_changed = observation.visible_labels != before.visible_labels
+        transitioned = focus_changed or labels_changed
+
+        # A label that was already visible cannot turn WAIT/BACK/SCROLL into a
+        # false success. A TAP must cause a real UI transition; other actions
+        # may succeed only when they newly reveal the expected setting.
+        self._verified = (
+            transitioned if kind is ProposalKind.TAP else (not before_match)
         )
         return self._verified
 
     def _shell(self, *args: str, timeout_s: float = 5.0) -> CommandResult:
-        result = self.adb.run(self.serial, ("shell", *args), timeout_s=timeout_s)
+        return self.adb.run(self.serial, ("shell", *args), timeout_s=timeout_s)
+
+    def _shell_checked(self, *args: str, timeout_s: float = 5.0) -> CommandResult:
+        result = self._shell(*args, timeout_s=timeout_s)
+        if result.returncode != 0:
+            raise LabEnvironmentError(
+                f"{self.serial}: adb shell {' '.join(args)} failed: "
+                f"{result.stderr.strip()}"
+            )
         return result
 
     def _input(self, *args: str) -> CommandResult:
         if not self.allow_input:
             raise LabEnvironmentError("input injection is not enabled for this target")
-        return self.adb.run(self.serial, ("shell", "input", *args), timeout_s=5.0)
+        result = self.adb.run(
+            self.serial, ("shell", "input", *args), timeout_s=5.0
+        )
+        if result.returncode != 0:
+            raise LabEnvironmentError(
+                f"{self.serial}: input {' '.join(args)} failed: "
+                f"{result.stderr.strip()}"
+            )
+        return result
 
 
 # ---------------------------------------------------------------------------
@@ -407,12 +555,21 @@ class AdbSettingsEnvironment:
 
 
 def _is_emulator(adb: AdbClient, serial: str) -> bool:
-    qemu = adb.run(serial, ("shell", "getprop", "ro.kernel.qemu")).stdout.strip()
-    characteristics = adb.run(
-        serial, ("shell", "getprop", "ro.build.characteristics")
-    ).stdout.strip()
-    product = adb.run(serial, ("shell", "getprop", "ro.build.product")).stdout.strip()
-    return qemu == "1" or "emulator" in characteristics or "sdk" in product
+    qemu_result = adb.run(
+        serial, ("shell", "getprop", "ro.kernel.qemu"), timeout_s=5.0
+    )
+    characteristics_result = adb.run(
+        serial,
+        ("shell", "getprop", "ro.build.characteristics"),
+        timeout_s=5.0,
+    )
+    if qemu_result.returncode != 0 or characteristics_result.returncode != 0:
+        return False
+    qemu = qemu_result.stdout.strip()
+    characteristics = characteristics_result.stdout.casefold()
+    return qemu == "1" or (
+        serial.startswith("emulator-") and "emulator" in characteristics
+    )
 
 
 def _first_emulator_serial(adb: AdbClient) -> str | None:
@@ -426,31 +583,38 @@ def _first_emulator_serial(adb: AdbClient) -> str | None:
     return None
 
 
-_LEASES: dict[str, object] = {}
+_LEASES: dict[str, tuple[object, str]] = {}
 
 
 def _autoboot(profile: EmulatorProfile, adb_path: str) -> str:
     """Boot a matching AVD and return its serial (process-wide registry)."""
     avd = profile.avd_device or profile.profile_id
     if avd in _LEASES:
-        return _LEASES[avd].serial  # type: ignore[attr-defined]
+        return _LEASES[avd][0].serial  # type: ignore[attr-defined]
     launcher = EmulatorLauncher(
         AdbClient(adb_path=adb_path),
         emulator_path=os.environ.get(ENV_EMULATOR, "emulator"),
     )
     port = _FIRST_PORT + 2 * len(_LEASES)
     lease = launcher.start_with_cold_boot_retry(profile, port=port, avd_name=avd)
-    _LEASES[avd] = lease
+    _LEASES[avd] = (lease, adb_path)
     return lease.serial
 
 
 @atexit.register
 def _stop_booted_emulators() -> None:
-    for lease in _LEASES.values():
+    for lease, adb_path in _LEASES.values():
         try:
-            AdbClient().run(lease.serial, ("emu", "kill"), timeout_s=3.0)  # type: ignore[attr-defined]
+            AdbClient(adb_path=adb_path).run(
+                lease.serial, ("emu", "kill"), timeout_s=3.0  # type: ignore[attr-defined]
+            )
         except Exception:
             pass
+
+
+def _profile_serial_env(profile: EmulatorProfile) -> str:
+    suffix = re.sub(r"[^A-Za-z0-9]+", "_", profile.profile_id).strip("_").upper()
+    return f"{ENV_SERIAL}_{suffix}"
 
 
 # ---------------------------------------------------------------------------
@@ -475,23 +639,37 @@ def create_environment(
     evidence, so the environment only needs the profile.
     """
     del os_settings_context  # settings evidence travels inside task.evidence
-    resolved_adb = adb or AdbClient(adb_path=adb_path or os.environ.get(ENV_ADB, "adb"))
-    resolved_serial = serial or os.environ.get(ENV_SERIAL)
-    if not resolved_serial:
+    resolved_adb = adb or AdbClient(
+        adb_path=adb_path or os.environ.get(ENV_ADB, "adb")
+    )
+    resolved_serial = (
+        serial
+        or os.environ.get(_profile_serial_env(profile))
+        or os.environ.get(ENV_SERIAL)
+    )
+    # Automatic reuse of an arbitrary attached emulator is safe only for the
+    # default AOSP lane. Custom OS profiles must use a profile-specific serial
+    # or autoboot their matching AVD, otherwise one AOSP emulator could be
+    # mislabeled as GrapheneOS/CalyxOS/e/OS during training.
+    if not resolved_serial and profile.os_family == "android-aosp":
         resolved_serial = _first_emulator_serial(resolved_adb)
     if not resolved_serial and os.environ.get(ENV_AUTOBOOT) == "1":
         resolved_serial = _autoboot(profile, resolved_adb.adb_path)
     if not resolved_serial:
         raise LabEnvironmentError(
-            "no emulator attached; boot an AVD first (or set "
-            f"{ENV_AUTOBOOT}=1 / {ENV_SERIAL})"
+            "no emulator attached for this profile; boot the matching AVD first "
+            f"(or set {ENV_AUTOBOOT}=1, {ENV_SERIAL}, or "
+            f"{_profile_serial_env(profile)})"
         )
     if allow_input is None:
         allow_input = os.environ.get(ENV_ALLOW_INPUT) == "1"
     return AdbSettingsEnvironment(
         adb=resolved_adb,
         serial=resolved_serial,
-        screenshots_dir=Path(screenshots_dir or os.environ.get(ENV_SCREENSHOTS, DEFAULT_SCREENSHOT_DIR)),
+        screenshots_dir=Path(
+            screenshots_dir
+            or os.environ.get(ENV_SCREENSHOTS, DEFAULT_SCREENSHOT_DIR)
+        ),
         allow_input=bool(allow_input),
     )
 

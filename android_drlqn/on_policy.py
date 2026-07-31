@@ -47,7 +47,11 @@ class OnPolicyDistiller(_BaseDistiller):
                     outcome = environment.step(proposal)
                     judgement = self.teacher.evaluate(task, profile, observation, proposal, outcome)
                     if judgement.confidence < self.config.min_teacher_confidence:
-                        raise RuntimeError("teacher confidence below configured threshold")
+                        raise RuntimeError(
+                            f"teacher confidence {judgement.confidence:.3f} below "
+                            f"configured threshold {self.config.min_teacher_confidence:.3f}; "
+                            f"teacher={judgement.teacher_id}; tags={judgement.tags}"
+                        )
                     reward = float(outcome.reward) + 0.5 * judgement.total_score + 0.25 * judgement.safety_score
                     trajectory.append((observation, proposal, outcome, judgement, reward))
                     rewards.append(reward)

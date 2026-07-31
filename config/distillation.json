@@ -12,7 +12,9 @@
     "endpoint": null,
     "model": null,
     "api_key_env": "BFL_API_KEY",
-    "allowed_hosts": ["api.bfl.ai"],
+    "allowed_hosts": [
+      "api.bfl.ai"
+    ],
     "early_access_acknowledged": false,
     "note": "FLUX.3 has no assumed public evaluator endpoint. Configure only after receiving and reviewing an Early Access contract."
   },
@@ -20,7 +22,7 @@
     "rollout_batch_size": 16,
     "max_steps_per_task": 12,
     "updates_per_batch": 1,
-    "min_teacher_confidence": 0.65,
+    "min_teacher_confidence": 0.5,
     "gamma": 0.98,
     "advantage_clip": 2.0,
     "supervised_weight": 1.0,

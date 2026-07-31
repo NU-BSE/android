@@ -51,6 +51,7 @@ import hashlib
 import json
 import math
 import random
+from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -238,9 +239,14 @@ def speedrun_lr(step: int, config: Mapping[str, float]) -> float:
     """Warmup + cosine-to-floor schedule from the speedrun record."""
     base = float(config["lr"])
     warmup = int(config["warmup_steps"])
-    total = max(warmup + 1, int(config["total_steps"]))
+    total = int(config["total_steps"])
     floor = float(config["min_lr_frac"])
-    if step < warmup:
+    if step < 0:
+        raise ValueError("step must be non-negative")
+    if base <= 0 or warmup < 0 or total < 1 or not 0 <= floor <= 1:
+        raise ValueError("invalid speedrun learning-rate configuration")
+    total = max(warmup + 1, total)
+    if warmup and step < warmup:
         return base * (step + 1) / warmup
     fraction = min(1.0, (step - warmup) / max(1, total - warmup))
     return base * (floor + (1 - floor) * 0.5 * (1 + math.cos(math.pi * fraction)))
@@ -359,11 +365,22 @@ def _require_torch():
     return torch
 
 
+@contextmanager
 def _adapters_disabled(peft_model):
-    """Context manager disabling LoRA adapters across peft versions."""
+    """Temporarily disable LoRA adapters across supported peft versions."""
     if hasattr(peft_model, "disable_adapter"):
-        return peft_model.disable_adapter()
-    return peft_model.disable_adapter_layers()
+        with peft_model.disable_adapter():
+            yield
+        return
+    disable = getattr(peft_model, "disable_adapter_layers", None)
+    enable = getattr(peft_model, "enable_adapter_layers", None)
+    if not callable(disable) or not callable(enable):
+        raise RuntimeError("installed peft version cannot disable adapters safely")
+    disable()
+    try:
+        yield
+    finally:
+        enable()
 
 
 @lru_cache(maxsize=1)
@@ -433,19 +450,29 @@ class QwenSpeedrunStudent:
         self._policy_version = 0
 
         self.tokenizer = AutoTokenizer.from_pretrained(model_id)
-        if dtype:
-            dtype = {"bfloat16": torch.bfloat16, "float16": torch.float16}.get(
-                str(dtype), torch.float32
-            )
+        dtype_name = str(dtype).lower() if dtype else None
+        dtype_map = {
+            "float32": torch.float32,
+            "fp32": torch.float32,
+            "float16": torch.float16,
+            "fp16": torch.float16,
+            "bfloat16": torch.bfloat16,
+            "bf16": torch.bfloat16,
+        }
+        if dtype_name:
+            if dtype_name not in dtype_map:
+                raise ValueError(f"unsupported dtype: {dtype}")
+            torch_dtype = dtype_map[dtype_name]
         else:
-            dtype = torch.bfloat16 if self.device == "cuda" else torch.float32
+            torch_dtype = torch.bfloat16 if self.device.startswith("cuda") else torch.float32
         try:
             model = AutoModelForCausalLM.from_pretrained(
-                model_id, dtype=dtype, attn_implementation="sdpa"
+                model_id, torch_dtype=torch_dtype, attn_implementation="sdpa"
             )
-        except TypeError:  # transformers<5 keyword
+        except TypeError:
+            # transformers 5 renamed torch_dtype to dtype.
             model = AutoModelForCausalLM.from_pretrained(
-                model_id, torch_dtype=dtype, attn_implementation="sdpa"
+                model_id, dtype=torch_dtype, attn_implementation="sdpa"
             )
 
         lora_cfg = dict(SPEEDRUN_LORA)
@@ -463,9 +490,17 @@ class QwenSpeedrunStudent:
                 target_modules=list(lora_cfg["target_modules"]),
             ),
         )
+        self.model.config.use_cache = False
         self.model.train()
 
-        self.eos_id = int(self.tokenizer.eos_token_id)
+        eos_id = self.tokenizer.eos_token_id
+        if eos_id is None:
+            eos_id = getattr(self.model.config, "eos_token_id", None)
+        if isinstance(eos_id, (list, tuple)):
+            eos_id = eos_id[0] if eos_id else None
+        if eos_id is None:
+            raise RuntimeError("student tokenizer/model does not define an EOS token")
+        self.eos_id = int(eos_id)
         self.kind_first_tokens = self._resolve_kind_tokens()
 
     # -- StudentPolicy protocol -------------------------------------------
@@ -483,35 +518,42 @@ class QwenSpeedrunStudent:
         torch = _require_torch()
         prompt_ids = self.encode_prompt(task, profile, observation)
         input_ids = torch.tensor([prompt_ids], dtype=torch.long, device=self.device)
-        with torch.no_grad():
-            hidden = self.hidden_states(input_ids)
-            logits = (hidden[0, -1] @ self.lm_head_weight().T).float()
-            kind_logits = logits[self._kind_token_ids]
-            probabilities = torch.softmax(kind_logits, dim=-1)
-            generated = self.model.generate(
-                input_ids=input_ids,
-                max_new_tokens=self.max_new_tokens,
-                do_sample=False,
-                eos_token_id=self.eos_id,
-                pad_token_id=self.eos_id,
-            )
+        was_training = self.model.training
+        self.model.eval()
+        try:
+            with torch.inference_mode():
+                hidden = self.hidden_states(input_ids)
+                logits = (hidden[0, -1] @ self.lm_head_weight().T).float()
+                kind_logits = logits[self._kind_token_ids]
+                probabilities = torch.softmax(kind_logits, dim=-1)
+                generated = self.model.generate(
+                    input_ids=input_ids,
+                    max_new_tokens=self.max_new_tokens,
+                    do_sample=False,
+                    eos_token_id=self.eos_id,
+                    pad_token_id=self.eos_id,
+                )
+        finally:
+            if was_training:
+                self.model.train()
         continuation = generated[0, input_ids.shape[1] :]
         text = ACTION_PREFIX + self.tokenizer.decode(
             continuation, skip_special_tokens=True
         )
-        distribution = tuple(float(value) for value in probabilities)
+        probabilities_cpu = probabilities.detach().float().cpu()
+        distribution = tuple(float(value) for value in probabilities_cpu)
         parsed = parse_action_json(text)
         valid_kinds = {kind.value for kind in _KINDS}
         if parsed is None or str(parsed.get("kind")) not in valid_kinds:
-            index = int(probabilities.argmax())
+            index = int(probabilities_cpu.argmax())
             return StudentProposal(
                 kind=_KINDS[index],
                 target_label=None,
                 bbox_norm=None,
                 message="(unparseable student output; fell back to argmax action)",
-                confidence=min(float(probabilities[index]), 0.2),
+                confidence=min(float(probabilities_cpu[index]), 0.2),
                 action_distribution=distribution,
-                log_probability=math.log(max(float(probabilities[index]), 1e-9)),
+                log_probability=math.log(max(float(probabilities_cpu[index]), 1e-9)),
                 policy_version=self.policy_version,
             )
         kind = ProposalKind(str(parsed["kind"]))
@@ -523,30 +565,153 @@ class QwenSpeedrunStudent:
             target_label=str(label) if label else None,
             bbox_norm=sanitize_bbox(parsed.get("bbox_norm")),
             message=message or (str(label) if label else task.prompt),
-            confidence=float(probabilities[index]),
+            confidence=float(probabilities_cpu[index]),
             action_distribution=distribution,
-            log_probability=math.log(max(float(probabilities[index]), 1e-9)),
+            log_probability=math.log(max(float(probabilities_cpu[index]), 1e-9)),
             policy_version=self.policy_version,
         )
 
     # -- helpers shared with the updater -----------------------------------
 
     def encode_prompt(
-        self,
-        task: CurriculumTask,
-        profile: EmulatorProfile,
-        observation: RolloutObservation,
-    ) -> list[int]:
-        """Chat-template prompt ids plus the forced action-JSON prefix."""
+    self,
+    task: CurriculumTask,
+    profile: EmulatorProfile,
+    observation: RolloutObservation,
+) -> list[int]:
+        """Encode a one-step Android action prompt with manual navigation rules."""
+
         messages = build_messages(task, profile, observation)
-        rendered = self.tokenizer.apply_chat_template(
-            messages, tokenize=True, add_generation_prompt=True
+
+        expected = (
+            dict(task.expected_output)
+            if isinstance(task.expected_output, Mapping)
+            else {}
         )
-        if isinstance(rendered, Mapping):  # transformers>=5 BatchEncoding
+        evidence = (
+            dict(task.evidence)
+            if isinstance(task.evidence, Mapping)
+            else {}
+        )
+
+        raw_ui_path = expected.get("ui_path") or evidence.get("ui_path") or ()
+
+        if isinstance(raw_ui_path, Sequence) and not isinstance(
+            raw_ui_path,
+            (str, bytes),
+        ):
+            ui_path = [
+                str(segment).strip()
+                for segment in raw_ui_path
+                if str(segment).strip()
+            ]
+        else:
+            ui_path = []
+
+        visible_labels = [
+            str(label).strip()
+            for label in observation.visible_labels
+            if str(label).strip()
+        ]
+        visible_by_name = {
+            label.casefold(): label
+            for label in visible_labels
+        }
+
+        # Select the deepest route segment currently visible.
+        #
+        # Example:
+        # ui_path:
+        #   Settings > Network & internet > Internet
+        #
+        # On the Settings root:
+        #   next_visible_segment = "Network & internet"
+        #
+        # On the Network & internet screen:
+        #   next_visible_segment = "Internet"
+        next_visible_segment = next(
+            (
+                visible_by_name[segment.casefold()]
+                for segment in reversed(ui_path)
+                if segment.casefold() in visible_by_name
+                and segment.casefold() != "settings"
+            ),
+            None,
+        )
+
+        informational = task.kind.value in {
+            "explain_setting",
+            "informational_qa",
+        }
+
+        if ui_path and not informational:
+            navigation_policy = {
+                "mode": "manual_ui_path",
+                "ui_path": ui_path,
+                "next_visible_segment": next_visible_segment,
+                "search_allowed": False,
+                "rules": [
+                    "Never tap a Settings search icon.",
+                    "Never open a Settings search field.",
+                    "Never type the destination setting name.",
+                    "Navigate only through visible categories and rows.",
+                    "Choose exactly one next action.",
+                    (
+                        "Tap next_visible_segment when it is not null and is a "
+                        "visible actionable row."
+                    ),
+                    (
+                        "Scroll when the next route segment is not visible but may "
+                        "be below the fold."
+                    ),
+                    (
+                        "Use back only when the current screen is outside the "
+                        "required ui_path."
+                    ),
+                    "Do not jump directly to the final destination.",
+                ],
+            }
+
+            # build_messages() returns a system message followed by a user message.
+            # Strengthen the system instruction because it has higher priority.
+            system_message = dict(messages[0])
+            system_message["content"] = (
+                system_message["content"]
+                + "\nManual navigation is mandatory. Settings Search is forbidden. "
+                "Do not tap a search icon, open a search field, or type the target "
+                "setting. Follow the supplied ui_path through visible UI rows."
+            )
+            messages[0] = system_message
+
+            user_message = dict(messages[-1])
+            user_message["content"] = (
+                user_message["content"]
+                + "\nNavigation policy: "
+                + json.dumps(
+                    navigation_policy,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            )
+            messages[-1] = user_message
+
+        rendered = self.tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,
+        )
+
+        if isinstance(rendered, Mapping):
+            # transformers >= 5 may return BatchEncoding.
             rendered = rendered["input_ids"]
+
         if rendered and isinstance(rendered[0], (list, tuple)):
             rendered = rendered[0]
-        return [int(token) for token in rendered] + self._tokenize(ACTION_PREFIX)
+
+        prompt_ids = [int(token) for token in rendered]
+
+        # Generation starts inside the canonical action JSON.
+        return prompt_ids + self._tokenize(ACTION_PREFIX)
 
     def encode_sample(self, sample: DistillationSample) -> PackedExample:
         prompt_ids = self.encode_prompt(sample.task, sample.profile, sample.observation)
@@ -556,7 +721,13 @@ class QwenSpeedrunStudent:
             raise ValueError("teacher completion does not start with the kind value")
         kind_ids = self._tokenize(kind.value)
         rest = completion[len(kind.value) :]
-        box_span, rest_ids = self._rest_with_box_span(rest, sample.judgement.target)
+        rest_box_span, rest_ids = self._rest_with_box_span(
+            rest, sample.judgement.target
+        )
+        box_span = None
+        if rest_box_span is not None:
+            start, end = rest_box_span
+            box_span = (len(kind_ids) + start, len(kind_ids) + end)
         return PackedExample(
             prompt_ids=tuple(prompt_ids),
             completion_ids=tuple(kind_ids + rest_ids + [self.eos_id]),
@@ -582,9 +753,14 @@ class QwenSpeedrunStudent:
         directory = Path(directory) / f"step-{step:08d}"
         directory.mkdir(parents=True, exist_ok=True)
         self.model.save_pretrained(directory)
-        adapter = directory / "adapter_model.safetensors"
-        payload = adapter.read_bytes() if adapter.is_file() else b""
-        digest = hashlib.sha256(payload).hexdigest()[:24]
+        candidates = (
+            directory / "adapter_model.safetensors",
+            directory / "adapter_model.bin",
+        )
+        adapter = next((path for path in candidates if path.is_file()), None)
+        if adapter is None:
+            raise RuntimeError("peft did not write an adapter checkpoint")
+        digest = hashlib.sha256(adapter.read_bytes()).hexdigest()[:24]
         (directory / "checkpoint.id").write_text(digest, encoding="utf-8")
         return digest
 
@@ -646,13 +822,27 @@ class SpeedrunLoraUpdater:
             self.config.update({key: float(value) for key, value in speedrun.items()})
         self.rng = random.Random(seed)
         self.step_count = 0
-        self.optimizer = torch.optim.AdamW(
-            student.trainable_parameters(),
-            lr=float(self.config["lr"]),
-            betas=(0.9, float(self.config["adam_beta2"])),
-            weight_decay=0.0,
-            fused=student.device == "cuda",
-        )
+        if int(self.config["pack_len"]) < 8:
+            raise ValueError("speedrun.pack_len must be at least 8")
+        if int(self.config["ce_chunk"]) < 1:
+            raise ValueError("speedrun.ce_chunk must be positive")
+        if not 0 < float(self.config["adam_beta2"]) < 1:
+            raise ValueError("speedrun.adam_beta2 must be in (0, 1)")
+        parameters = student.trainable_parameters()
+        if not parameters:
+            raise RuntimeError("student has no trainable LoRA parameters")
+        optimizer_kwargs = {
+            "lr": float(self.config["lr"]),
+            "betas": (0.9, float(self.config["adam_beta2"])),
+            "weight_decay": 0.0,
+        }
+        if str(student.device).startswith("cuda"):
+            optimizer_kwargs["fused"] = True
+        try:
+            self.optimizer = torch.optim.AdamW(parameters, **optimizer_kwargs)
+        except TypeError:
+            optimizer_kwargs.pop("fused", None)
+            self.optimizer = torch.optim.AdamW(parameters, **optimizer_kwargs)
 
     def update(self, samples: Sequence[DistillationSample], config: OnPolicyConfig) -> str:
         torch = _require_torch()
@@ -689,9 +879,11 @@ class SpeedrunLoraUpdater:
             shifted_y = labels[:, 1:].reshape(-1)
             keep = (shifted_y != -100).nonzero(as_tuple=True)[0]
 
-            loss = config.language_weight * chunked_ce.apply(
-                shifted_h[keep], lm_weight, shifted_y[keep], ce_chunk
-            )
+            loss = hidden.sum() * 0.0
+            if keep.numel() and config.language_weight > 0:
+                loss = loss + config.language_weight * chunked_ce.apply(
+                    shifted_h[keep], lm_weight, shifted_y[keep], ce_chunk
+                )
 
             kind_positions = block["kind_positions"]
             if kind_positions:
@@ -752,7 +944,7 @@ class SpeedrunLoraUpdater:
                 )
                 loss = loss + config.grounding_weight * grounding
 
-            loss.backward()
+            (loss / len(blocks)).backward()
 
         torch.nn.utils.clip_grad_norm_(
             self.student.trainable_parameters(), float(self.config["grad_clip"])

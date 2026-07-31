@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import random
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -160,6 +161,15 @@ def test_speedrun_lr_warmup_cosine_floor():
     assert speedrun_lr(500, config) == pytest.approx(0.05 * 4e-4)
 
 
+def test_speedrun_lr_supports_zero_warmup_and_rejects_invalid_config():
+    config = {"lr": 4e-4, "warmup_steps": 0, "min_lr_frac": 0.05, "total_steps": 10}
+    assert speedrun_lr(0, config) == pytest.approx(4e-4)
+    with pytest.raises(ValueError):
+        speedrun_lr(0, {**config, "lr": 0.0})
+    with pytest.raises(ValueError):
+        speedrun_lr(-1, config)
+
+
 def _example(prompt, completion, kind=11, student_kind=22, advantage=0.5, box=None):
     return PackedExample(
         prompt_ids=tuple(prompt),
@@ -276,6 +286,26 @@ class FakeTokenizer:
 
     def decode(self, ids, skip_special_tokens=True):
         return "".join(self.reverse[int(i)] for i in ids if int(i) in self.reverse)
+
+
+def test_encode_sample_box_span_is_relative_to_full_completion():
+    tokenizer = FakeTokenizer()
+    student = object.__new__(project_train.QwenSpeedrunStudent)
+    student.tokenizer = tokenizer
+    student.eos_id = tokenizer.eos_token_id
+    student._policy_version = 0
+    student.kind_first_tokens = {
+        kind: tokenizer(kind.value)["input_ids"][0] for kind in ProposalKind
+    }
+    student._kind_token_ids = list(student.kind_first_tokens.values())
+    student.encode_prompt = lambda *args: [101, 102]  # type: ignore[method-assign]
+
+    sample = _sample(student)
+    encoded = student.encode_sample(sample)
+    assert encoded.box_span is not None
+    start, end = encoded.box_span
+    marker = tokenizer.decode(encoded.completion_ids[start:end])
+    assert marker == "[0.1, 0.1, 0.4, 0.2]"
 
 
 @pytest.fixture()
@@ -492,17 +522,20 @@ FOCUS_BT = "mCurrentFocus=Window{aa u0 com.android.settings/.SubSettings}\n"
 class FakeAdbRunner:
     """Scripted adb CommandRunner: records calls, serves fixture responses."""
 
-    def __init__(self, qemu="1", hierarchies=(), focuses=()):
+    def __init__(self, qemu="1", hierarchies=(), focuses=(), fail_input=False):
         self.calls = []
         self.qemu = qemu
         self.hierarchies = list(hierarchies)
         self.focuses = list(focuses)
+        self.fail_input = fail_input
 
     def __call__(self, command, timeout_s):
         self.calls.append(tuple(command))
         if "devices" in command:
             return CommandResult(0, "List of devices attached\nemulator-5554\tdevice\n", "")
         args = tuple(command[3:])
+        if self.fail_input and args[:2] == ("shell", "input"):
+            return CommandResult(1, "", "input failed")
         if args[:2] == ("shell", "getprop"):
             prop = args[2]
             values = {
@@ -562,6 +595,17 @@ def test_parse_current_focus():
     assert project_lab.parse_current_focus("mCurrentFocus=null") == ("", "")
 
 
+def test_parse_current_focus_accepts_top_resumed_activity():
+    payload = (
+        "topResumedActivity=ActivityRecord{abc u0 "
+        "com.android.settings/.SubSettings t42}"
+    )
+    assert project_lab.parse_current_focus(payload) == (
+        "com.android.settings",
+        ".SubSettings",
+    )
+
+
 def test_label_matches_casefolded_substring():
     assert project_lab.label_matches("bluetooth", ("Bluetooth",))
     assert project_lab.label_matches("Bluetooth", ("Use Bluetooth",))
@@ -607,6 +651,19 @@ def test_environment_tap_by_label_verifies_transition(tmp_path):
     assert outcome.verified and outcome.terminal and outcome.reward == 1.0
 
 
+def test_environment_wait_does_not_verify_an_already_visible_label(tmp_path):
+    env, _ = make_environment(
+        tmp_path,
+        hierarchies=[HIERARCHY_MAIN, HIERARCHY_MAIN],
+        focuses=[FOCUS_MAIN, FOCUS_MAIN],
+    )
+    env.reset(task(), profile())
+    outcome = env.step(_proposal(ProposalKind.WAIT))
+    assert not outcome.verified
+    assert not outcome.terminal
+    assert outcome.next_observation is not None
+
+
 def test_environment_tap_by_bbox_uses_display_size(tmp_path):
     env, runner = make_environment(tmp_path)
     env.reset(task(), profile())
@@ -648,6 +705,28 @@ def test_environment_scroll_and_back(tmp_path):
     commands = [" ".join(call) for call in runner.calls]
     assert any("input swipe" in command for command in commands)
     assert any("input keyevent KEYCODE_BACK" in command for command in commands)
+
+
+def test_environment_input_failure_is_not_silently_ignored(tmp_path):
+    env, runner = make_environment(tmp_path)
+    env.reset(task(), profile())
+    runner.fail_input = True
+    with pytest.raises(project_lab.LabEnvironmentError, match=r"input tap .* failed"):
+        env.step(_proposal(ProposalKind.TAP))
+
+
+def test_custom_os_does_not_reuse_arbitrary_attached_emulator(monkeypatch, tmp_path):
+    custom_profile = replace(profile(), os_family="calyxos", profile_id="calyxos-test")
+    runner = FakeAdbRunner()
+    monkeypatch.delenv(project_lab.ENV_SERIAL, raising=False)
+    monkeypatch.delenv(project_lab.ENV_AUTOBOOT, raising=False)
+    with pytest.raises(project_lab.LabEnvironmentError, match="no emulator attached"):
+        project_lab.create_environment(
+            custom_profile,
+            adb=AdbClient(runner=runner),
+            screenshots_dir=tmp_path,
+            allow_input=True,
+        )
 
 
 def test_create_environment_serial_resolution(monkeypatch, tmp_path):
