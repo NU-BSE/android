@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from android_drlqn import ollama_text_teacher as teacher_module
 from android_drlqn.distillation import (
     EnvironmentOutcome,
     ProposalKind,
@@ -578,7 +579,9 @@ def test_truncated_critic_json_is_retried_once_without_images(tmp_path):
     assert retry_critic["options"]["num_predict"] == 1024
     retry_state = json.loads(retry_critic["messages"][1]["content"])
     assert retry_state["retry"]["done_reason"] == "length"
-    assert "partial_response" in retry_state["retry"]
+    assert retry_state["retry"]["partial_response_chars"] > 0
+    assert "partial_response" not in retry_state["retry"]
+    assert "unterminated" not in retry_critic["messages"][1]["content"]
     assert "screenshot_reference" not in retry_critic["messages"][1]["content"]
     assert "critic-json-retried" in result.tags
 
@@ -711,3 +714,123 @@ def test_critic_payload_is_compact_for_large_nested_state():
 
     assert len(encoded) < 45_000
     assert len(payload["environment"]["visible_labels"]) == 24
+
+
+def test_critic_format_uses_closed_string_choices(tmp_path):
+    transport = FakeTransport()
+    evaluator = teacher(tmp_path, transport)
+
+    evaluator.evaluate(
+        task(),
+        selected_emulator_matrix().profiles[0],
+        observation(tmp_path),
+        proposal(),
+        outcome(),
+    )
+
+    critic_call = [
+        payload
+        for endpoint, payload in transport.calls
+        if endpoint == "/api/chat"
+        and payload["model"] == "android-ui-tars-critic:latest"
+    ][0]
+    schema = critic_call["format"]
+    target = schema["properties"]["target"]["properties"]
+    labels = target["target_label"]["anyOf"][1]["enum"]
+    responses = target["response"]["enum"]
+    tag_schema = schema["properties"]["tags"]
+
+    assert "Bluetooth" in labels
+    assert "Tap Bluetooth" in responses
+    assert len(responses) <= 12
+    assert all(len(value) <= 240 for value in responses)
+    assert tag_schema["maxItems"] == 8
+    assert "enum" in tag_schema["items"]
+    assert "settings, settings, settings" not in json.dumps(schema)
+
+
+def test_closed_schema_bounds_verbose_expected_output():
+    from types import SimpleNamespace
+
+    repeated = ", ".join(f"setting-{index}" for index in range(2_000))
+    fake_task = SimpleNamespace(
+        task_id="task",
+        kind=SimpleNamespace(value="ground_ui"),
+        prompt="Ground the requested setting",
+        expected_output={"all_settings": repeated},
+        evidence={},
+    )
+    fake_profile = SimpleNamespace(
+        profile_id="profile",
+        os_family="android-aosp",
+        android_version="14",
+        api_level=34,
+    )
+    fake_observation = SimpleNamespace(
+        package="pkg",
+        activity="activity",
+        step_index=0,
+        visible_labels=("Bluetooth", "Network & internet"),
+        accessibility_summary={},
+    )
+    fake_proposal = SimpleNamespace(
+        kind=SimpleNamespace(value="tap"),
+        target_label="Bluetooth",
+        bbox_norm=(0.1, 0.1, 0.4, 0.2),
+        message="Tap Bluetooth",
+        confidence=0.8,
+    )
+    fake_outcome = SimpleNamespace(
+        reward=1.0,
+        terminal=True,
+        verified=True,
+        reason="verified",
+    )
+    perception = {
+        "screen_summary": "Settings",
+        "visible_elements": [
+            {"label": "Bluetooth", "role": "row", "state": "visible"}
+        ],
+        "uncertainties": [],
+    }
+
+    payload = TextOnlyOllamaTeacher._critic_payload(
+        fake_task,
+        fake_profile,
+        fake_observation,
+        fake_proposal,
+        fake_outcome,
+        perception,
+    )
+    schema = teacher_module._judgement_schema(payload)
+    responses = schema["properties"]["target"]["properties"]["response"]["enum"]
+
+    assert len(responses) <= 12
+    assert max(map(len, responses)) <= 240
+    assert len(json.dumps(schema, ensure_ascii=False)) < 10_000
+
+
+def test_retry_payload_does_not_echo_truncated_generation(tmp_path):
+    evaluator = teacher(tmp_path, FakeTransport())
+    partial = '{"target":{"response":"' + "settings," * 1_000
+    error = teacher_module.InvalidModelJsonError(
+        "critic",
+        partial,
+        {"done": True, "done_reason": "length"},
+        json.JSONDecodeError("unterminated", partial, 22),
+    )
+    payload = {
+        "task": {},
+        "profile": {},
+        "environment": {},
+        "student": {},
+        "outcome": {},
+        "rubric": {},
+    }
+
+    retry = evaluator._critic_retry_payload(payload, error)
+    encoded = json.dumps(retry)
+
+    assert retry["retry"]["partial_response_chars"] == len(partial)
+    assert "settings,settings" not in encoded
+    assert "partial_response" not in retry["retry"]
