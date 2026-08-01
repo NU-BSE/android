@@ -85,6 +85,7 @@ from .ollama import (
     normalize_grounding_payload,
     ollama_grounding_vlm,
 )
+from .on_policy import OnPolicyDistiller
 from .runtime_config import (
     BuildManifest,
     litert_export_manifest,

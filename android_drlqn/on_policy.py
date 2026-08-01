@@ -14,13 +14,20 @@ import numpy as np
 from .distillation import (
     DistillationMetrics,
     DistillationSample,
-    OnPolicyDistiller as _BaseDistiller,
 )
 from .document_curriculum import CoverageStatus, CurriculumTask
 from .emulator_lab import EmulatorMatrix
 
 
-class OnPolicyDistiller(_BaseDistiller):
+class OnPolicyDistiller:
+    def __init__(self, student: StudentPolicy, teacher: TeacherEvaluator, updater: PolicyUpdater, environment_factory: Callable[[EmulatorProfile], EmulatorEnvironment], config: OnPolicyConfig | None = None, coverage: CoverageLedger | None = None):
+        self.student = student
+        self.teacher = teacher
+        self.updater = updater
+        self.environment_factory = environment_factory
+        self.config = config or OnPolicyConfig()
+        self.coverage = coverage
+    
     def train(self, tasks: Sequence[CurriculumTask], matrix: EmulatorMatrix) -> DistillationMetrics:
         if not tasks:
             return DistillationMetrics(0, 0, 0, 0.0, 0.0, None)
@@ -31,10 +38,17 @@ class OnPolicyDistiller(_BaseDistiller):
         checkpoint = None
         task_profiles: dict[str, set[str]] = defaultdict(set)
         reviewed_task_profiles: set[tuple[str, str]] = set()
+        profiles = tuple(matrix.profiles)
 
-        for task in tasks:
-            profiles = matrix.select_for_os(task.os_family)
-            for profile in profiles:
+        for profile in profiles:
+            profile_tasks = [
+                task
+                for task in tasks
+                if task.os_family == profile.os_family
+            ]
+            environment = self.environment_factory(profile)
+            for task in profile_tasks:
+                observation = environment.reset(task, profile)
                 task_profiles[task.task_id].add(profile.profile_id)
                 environment = self.environment_factory(profile)
                 observation = environment.reset(task, profile)
@@ -105,3 +119,19 @@ class OnPolicyDistiller(_BaseDistiller):
             mean_teacher_score=float(np.mean(scores)) if scores else 0.0,
             checkpoint_id=checkpoint,
         )
+    def _update(self, samples: Sequence[DistillationSample]) -> str:
+        checkpoint = ""
+        for _ in range(self.config.updates_per_batch):
+            checkpoint = self.updater.update(samples, self.config)
+        return checkpoint
+
+    def _advantages(self, rewards: Sequence[float]) -> tuple[float, ...]:
+        returns = []
+        value = 0.0
+        for reward in reversed(rewards):
+            value = reward + self.config.gamma * value
+            returns.append(value)
+        returns.reverse()
+        baseline = float(np.mean(returns)) if returns else 0.0
+        return tuple(float(np.clip(value - baseline, -self.config.advantage_clip, self.config.advantage_clip)) for value in returns)
+

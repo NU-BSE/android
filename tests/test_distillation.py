@@ -16,7 +16,6 @@ from android_drlqn.distillation import (
     load_distillation_config,
 )
 
-
 def make_proposal(
     kind: ProposalKind = ProposalKind.TAP,
 ) -> StudentProposal:

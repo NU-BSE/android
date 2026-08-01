@@ -15,7 +15,6 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable, Iterable, Mapping, Protocol, Sequence
 from urllib.parse import urlparse
-
 import numpy as np
 
 from .document_curriculum import CoverageLedger, CurriculumTask
@@ -291,88 +290,6 @@ class ReplayTeacher:
     def evaluate(self, task: CurriculumTask, profile: EmulatorProfile, observation: RolloutObservation, proposal: StudentProposal, outcome: EnvironmentOutcome) -> TeacherJudgement:
         key = f"{task.task_id}:{profile.profile_id}:{observation.step_index}"
         return self.judgements.get(key) or TeacherJudgement(self.teacher_id, 1.0, float(outcome.verified), float(outcome.verified), float(outcome.verified), 1.0, 1.0, True, TeacherTarget(proposal.kind, proposal.target_label, proposal.bbox_norm, proposal.message), ("replay-fallback",))
-
-
-class OnPolicyDistiller:
-    def __init__(self, student: StudentPolicy, teacher: TeacherEvaluator, updater: PolicyUpdater, environment_factory: Callable[[EmulatorProfile], EmulatorEnvironment], config: OnPolicyConfig | None = None, coverage: CoverageLedger | None = None):
-        self.student = student
-        self.teacher = teacher
-        self.updater = updater
-        self.environment_factory = environment_factory
-        self.config = config or OnPolicyConfig()
-        self.coverage = coverage
-
-    def train(self, tasks: Sequence[CurriculumTask], matrix: EmulatorMatrix) -> DistillationMetrics:
-        if not tasks:
-            return DistillationMetrics(0, 0, 0, 0.0, 0.0, None)
-        samples: list[DistillationSample] = []
-        rewards: list[float] = []
-        teacher_scores: list[float] = []
-        verified = updates = 0
-        checkpoint = None
-        for task in tasks:
-            profiles = matrix.select_for_os(task.os_family)
-            for profile in profiles:
-                environment = self.environment_factory(profile)
-                observation = environment.reset(task, profile)
-                trajectory: list[tuple[RolloutObservation, StudentProposal, EnvironmentOutcome, TeacherJudgement, float]] = []
-                for _ in range(self.config.max_steps_per_task):
-                    proposal = self.student.propose(task, profile, observation)
-                    lag = self.student.policy_version - proposal.policy_version
-                    if lag > self.config.max_policy_lag:
-                        raise RuntimeError(f"off-policy rollout rejected: policy lag {lag}")
-                    outcome = environment.step(proposal)
-                    judgement = self.teacher.evaluate(task, profile, observation, proposal, outcome)
-                    if judgement.confidence < self.config.min_teacher_confidence:
-                        raise RuntimeError("teacher confidence below configured threshold")
-                    reward = float(outcome.reward) + 0.5 * judgement.total_score + 0.25 * judgement.safety_score
-                    trajectory.append((observation, proposal, outcome, judgement, reward))
-                    rewards.append(reward)
-                    teacher_scores.append(judgement.total_score)
-                    verified += int(outcome.verified)
-                    if self.coverage:
-                        self.coverage.mark_rollout(task.coverage_id, profile.profile_id)
-                        self.coverage.mark_teacher_review(task.coverage_id, judgement.teacher_id)
-                    if outcome.terminal or outcome.next_observation is None:
-                        break
-                    observation = outcome.next_observation
-                advantages = self._advantages([item[4] for item in trajectory])
-                for item, advantage in zip(trajectory, advantages):
-                    observation, proposal, outcome, judgement, reward = item
-                    samples.append(DistillationSample(task, profile, observation, proposal, outcome, judgement, reward, advantage))
-                    if len(samples) >= self.config.rollout_batch_size:
-                        checkpoint = self._update(samples)
-                        updates += 1
-                        samples.clear()
-        if samples:
-            checkpoint = self._update(samples)
-            updates += 1
-        if self.coverage and checkpoint:
-            for task in tasks:
-                entry = self.coverage.entries.get(task.coverage_id)
-                if entry and entry.status not in {entry.status.NON_ACTIONABLE, entry.status.BLOCKED}:
-                    self.coverage.mark_student_update(task.coverage_id, checkpoint)
-                    same_os_profiles = {profile.profile_id for profile in matrix.select_for_os(task.os_family)}
-                    if same_os_profiles and same_os_profiles.issubset(set(entry.emulator_profile_ids)):
-                        self.coverage.mark_validated(task.coverage_id, "all selected profiles reviewed and checkpointed")
-        return DistillationMetrics(len(rewards), updates, verified, float(np.mean(rewards)) if rewards else 0.0, float(np.mean(teacher_scores)) if teacher_scores else 0.0, checkpoint)
-
-    def _update(self, samples: Sequence[DistillationSample]) -> str:
-        checkpoint = ""
-        for _ in range(self.config.updates_per_batch):
-            checkpoint = self.updater.update(samples, self.config)
-        return checkpoint
-
-    def _advantages(self, rewards: Sequence[float]) -> tuple[float, ...]:
-        returns = []
-        value = 0.0
-        for reward in reversed(rewards):
-            value = reward + self.config.gamma * value
-            returns.append(value)
-        returns.reverse()
-        baseline = float(np.mean(returns)) if returns else 0.0
-        return tuple(float(np.clip(value - baseline, -self.config.advantage_clip, self.config.advantage_clip)) for value in returns)
-
 
 class NumpyLinearStudent:
     """Small trainable policy used by CI and integration tests."""

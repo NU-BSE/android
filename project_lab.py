@@ -25,12 +25,15 @@ Safety contract (mirrors ``android_drlqn.emulator.AdbResearchActuator``):
 
 Configuration (environment variables):
 
-- ``ANDROID_DRLQN_ADB_SERIAL`` -- target serial (default: first ``emulator-*``)
+- ``ANDROID_DRLQN_ADB_SERIAL`` -- optional global fallback serial; it is used
+  only when it matches the requested profile
+- ``ANDROID_DRLQN_ADB_SERIAL_<PROFILE_ID>`` -- preferred profile-specific serial
 - ``ANDROID_DRLQN_ALLOW_EMULATOR_INPUT`` -- "1" to permit input injection
 - ``ANDROID_DRLQN_LAB_SCREENSHOTS`` -- screenshot directory
   (default ``artifacts/lab-screenshots``)
-- ``ANDROID_DRLQN_LAB_AUTOBOOT`` -- "1" to boot a matching AVD when no
-  emulator is attached (uses ``EmulatorLauncher``; default off)
+- ``ANDROID_DRLQN_LAB_AUTOBOOT`` -- "1" to manage matching AVDs sequentially:
+  the plugin stops the previous plugin-owned AVD before booting the next one
+  (uses ``EmulatorLauncher``; default off)
 - ``ANDROID_DRLQN_ADB`` / ``ANDROID_DRLQN_EMULATOR`` -- tool paths
 
 The module is importable with only the repository dependencies; adb is only
@@ -61,7 +64,6 @@ from android_drlqn.emulator_runtime import (
     AdbClient,
     CommandResult,
     EmulatorLauncher,
-    serial_for_port,
 )
 
 ENV_SERIAL = "ANDROID_DRLQN_ADB_SERIAL"
@@ -253,6 +255,10 @@ class AdbSettingsEnvironment:
     _nodes: tuple[UiNode, ...] = field(default=(), init=False)
     _verified: bool = field(default=False, init=False)
     _last_observation: RolloutObservation | None = field(default=None, init=False)
+    _close_callback: Callable[[], None] | None = field(
+        default=None, repr=False, compare=False
+    )
+    _closed: bool = field(default=False, init=False, repr=False)
 
     # -- EmulatorEnvironment protocol --------------------------------------
 
@@ -372,6 +378,24 @@ class AdbSettingsEnvironment:
                 else "transition unverified"
             ),
         )
+
+    def close(self) -> None:
+        """Release a plugin-owned emulator after this profile finishes.
+
+        Manually attached emulators are never stopped. The callback is installed
+        only when ``create_environment`` autobooted the matching AVD.
+        """
+        if self._closed:
+            return
+        self._closed = True
+        if self._close_callback is not None:
+            self._close_callback()
+
+    def __enter__(self) -> "AdbSettingsEnvironment":
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        self.close()
 
     # -- internals ----------------------------------------------------------
 
@@ -572,44 +596,230 @@ def _is_emulator(adb: AdbClient, serial: str) -> bool:
     )
 
 
-def _first_emulator_serial(adb: AdbClient) -> str | None:
+def _attached_emulator_serials(adb: AdbClient) -> tuple[str, ...]:
     result = adb._runner((adb.adb_path, "devices"), 5.0)
     if result.returncode != 0:
-        return None
+        return ()
+    serials: list[str] = []
     for line in result.stdout.splitlines()[1:]:
         parts = line.split()
-        if len(parts) == 2 and parts[1] == "device" and parts[0].startswith("emulator-"):
-            return parts[0]
+        if (
+            len(parts) >= 2
+            and parts[1] == "device"
+            and parts[0].startswith("emulator-")
+        ):
+            serials.append(parts[0])
+    return tuple(serials)
+
+
+def _emulator_api(adb: AdbClient, serial: str) -> int | None:
+    result = adb.run(
+        serial,
+        ("shell", "getprop", "ro.build.version.sdk"),
+        timeout_s=5.0,
+    )
+    value = result.stdout.strip() if result.returncode == 0 else ""
+    return int(value) if value.isdigit() else None
+
+
+def _emulator_avd_name(adb: AdbClient, serial: str) -> str:
+    result = adb.run(serial, ("emu", "avd", "name"), timeout_s=5.0)
+    if result.returncode != 0:
+        return ""
+    for line in result.stdout.splitlines():
+        value = line.strip()
+        if value and value != "OK":
+            return value
+    return ""
+
+
+def _normalize_avd_name(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", value.casefold())
+
+
+def _expected_avd_name(profile: EmulatorProfile) -> str:
+    return str(profile.avd_device or profile.profile_id)
+
+
+def _serial_mismatch_reason(
+    adb: AdbClient,
+    serial: str,
+    profile: EmulatorProfile,
+    *,
+    require_avd_match: bool,
+) -> str | None:
+    if not _is_emulator(adb, serial):
+        return "target is not an emulator"
+
+    actual_api = _emulator_api(adb, serial)
+    if actual_api is None:
+        return "could not read ro.build.version.sdk"
+    if actual_api != int(profile.api_level):
+        return (
+            f"API {actual_api} does not match profile {profile.profile_id} "
+            f"API {profile.api_level}"
+        )
+
+    expected_avd = _expected_avd_name(profile)
+    actual_avd = _emulator_avd_name(adb, serial)
+    if actual_avd and (
+        _normalize_avd_name(actual_avd) != _normalize_avd_name(expected_avd)
+    ):
+        return f"AVD {actual_avd!r} does not match expected {expected_avd!r}"
+    elif not actual_avd and (require_avd_match or profile.os_family != "android-aosp"):
+        return f"could not verify expected AVD {expected_avd!r}"
     return None
 
 
-_LEASES: dict[str, tuple[object, str]] = {}
+def _require_serial_for_profile(
+    adb: AdbClient,
+    serial: str,
+    profile: EmulatorProfile,
+    *,
+    source: str,
+) -> str:
+    reason = _serial_mismatch_reason(
+        adb,
+        serial,
+        profile,
+        require_avd_match=profile.os_family != "android-aosp",
+    )
+    if reason is not None:
+        raise LabEnvironmentError(f"{source}={serial}: {reason}")
+    return serial
+
+
+def _matching_emulator_serial(
+    adb: AdbClient,
+    profile: EmulatorProfile,
+) -> str | None:
+    """Return an attached emulator matching this profile, never just the first one."""
+    expected_avd = _normalize_avd_name(_expected_avd_name(profile))
+    api_only_matches: list[str] = []
+
+    for serial in _attached_emulator_serials(adb):
+        if not _is_emulator(adb, serial):
+            continue
+        if _emulator_api(adb, serial) != int(profile.api_level):
+            continue
+
+        actual_avd = _normalize_avd_name(_emulator_avd_name(adb, serial))
+        if actual_avd:
+            if actual_avd == expected_avd:
+                return serial
+            # A known, different AVD is never an API-only match.
+            continue
+
+        # An API-only fallback is acceptable only when adb cannot report the
+        # AVD name and only for the stock AOSP lane. Custom OS profiles must
+        # prove their AVD identity to avoid mislabeled rollouts.
+        if profile.os_family == "android-aosp":
+            api_only_matches.append(serial)
+
+    # Avoid picking arbitrarily when two attached AOSP emulators share an API.
+    return api_only_matches[0] if len(api_only_matches) == 1 else None
+
+
+def _attached_emulator_summary(adb: AdbClient) -> str:
+    rows: list[str] = []
+    for serial in _attached_emulator_serials(adb):
+        api = _emulator_api(adb, serial)
+        avd = _emulator_avd_name(adb, serial) or "unknown-avd"
+        rows.append(f"{serial}(API {api if api is not None else '?'}, AVD {avd})")
+    return ", ".join(rows) if rows else "none"
+
+
+# Only emulators started by this module are lifecycle-managed. A user-started
+# emulator is never killed by the plugin.
+_ACTIVE_LEASE: tuple[str, object, str] | None = None
+
+
+def _stop_lease(lease: object, adb_path: str) -> None:
+    serial = str(getattr(lease, "serial", ""))
+    if not serial:
+        return
+    try:
+        AdbClient(adb_path=adb_path).run(
+            serial,
+            ("emu", "kill"),
+            timeout_s=5.0,
+        )
+    except Exception:
+        return
+
+    # Free the emulator console/adb port before the next sequential profile.
+    deadline = time.monotonic() + 20.0
+    adb = AdbClient(adb_path=adb_path)
+    while time.monotonic() < deadline:
+        if serial not in _attached_emulator_serials(adb):
+            break
+        time.sleep(0.25)
+
+
+def _stop_active_autoboot() -> None:
+    global _ACTIVE_LEASE
+    active = _ACTIVE_LEASE
+    _ACTIVE_LEASE = None
+    if active is None:
+        return
+    _, lease, adb_path = active
+    _stop_lease(lease, adb_path)
+
+
+def _stop_active_if_different(serial: str) -> None:
+    active = _ACTIVE_LEASE
+    if active is None:
+        return
+    active_serial = str(getattr(active[1], "serial", ""))
+    if active_serial and active_serial != serial:
+        _stop_active_autoboot()
 
 
 def _autoboot(profile: EmulatorProfile, adb_path: str) -> str:
-    """Boot a matching AVD and return its serial (process-wide registry)."""
-    avd = profile.avd_device or profile.profile_id
-    if avd in _LEASES:
-        return _LEASES[avd][0].serial  # type: ignore[attr-defined]
+    """Boot exactly one matching AVD for sequential profile-major training."""
+    global _ACTIVE_LEASE
+
+    avd = _expected_avd_name(profile)
+    if _ACTIVE_LEASE is not None:
+        active_avd, lease, active_adb_path = _ACTIVE_LEASE
+        active_serial = str(getattr(lease, "serial", ""))
+        if (
+            active_avd == avd
+            and active_adb_path == adb_path
+            and active_serial
+            and active_serial in _attached_emulator_serials(
+                AdbClient(adb_path=adb_path)
+            )
+        ):
+            return active_serial
+        _stop_active_autoboot()
+
     launcher = EmulatorLauncher(
         AdbClient(adb_path=adb_path),
         emulator_path=os.environ.get(ENV_EMULATOR, "emulator"),
     )
-    port = _FIRST_PORT + 2 * len(_LEASES)
-    lease = launcher.start_with_cold_boot_retry(profile, port=port, avd_name=avd)
-    _LEASES[avd] = (lease, adb_path)
-    return lease.serial
+    # Reuse one fixed port because only one plugin-owned AVD is alive at once.
+    lease = launcher.start_with_cold_boot_retry(
+        profile,
+        port=_FIRST_PORT,
+        avd_name=avd,
+    )
+    _ACTIVE_LEASE = (avd, lease, adb_path)
+    return str(lease.serial)
+
+
+def _release_managed_serial(serial: str) -> None:
+    active = _ACTIVE_LEASE
+    if active is None:
+        return
+    active_serial = str(getattr(active[1], "serial", ""))
+    if active_serial == serial:
+        _stop_active_autoboot()
 
 
 @atexit.register
 def _stop_booted_emulators() -> None:
-    for lease, adb_path in _LEASES.values():
-        try:
-            AdbClient(adb_path=adb_path).run(
-                lease.serial, ("emu", "kill"), timeout_s=3.0  # type: ignore[attr-defined]
-            )
-        except Exception:
-            pass
+    _stop_active_autoboot()
 
 
 def _profile_serial_env(profile: EmulatorProfile) -> str:
@@ -642,25 +852,70 @@ def create_environment(
     resolved_adb = adb or AdbClient(
         adb_path=adb_path or os.environ.get(ENV_ADB, "adb")
     )
-    resolved_serial = (
-        serial
-        or os.environ.get(_profile_serial_env(profile))
-        or os.environ.get(ENV_SERIAL)
-    )
-    # Automatic reuse of an arbitrary attached emulator is safe only for the
-    # default AOSP lane. Custom OS profiles must use a profile-specific serial
-    # or autoboot their matching AVD, otherwise one AOSP emulator could be
-    # mislabeled as GrapheneOS/CalyxOS/e/OS during training.
-    if not resolved_serial and profile.os_family == "android-aosp":
-        resolved_serial = _first_emulator_serial(resolved_adb)
-    if not resolved_serial and os.environ.get(ENV_AUTOBOOT) == "1":
-        resolved_serial = _autoboot(profile, resolved_adb.adb_path)
-    if not resolved_serial:
-        raise LabEnvironmentError(
-            "no emulator attached for this profile; boot the matching AVD first "
-            f"(or set {ENV_AUTOBOOT}=1, {ENV_SERIAL}, or "
-            f"{_profile_serial_env(profile)})"
+    profile_env = _profile_serial_env(profile)
+    profile_serial = os.environ.get(profile_env)
+    global_serial = os.environ.get(ENV_SERIAL)
+    autoboot_enabled = os.environ.get(ENV_AUTOBOOT) == "1"
+
+    resolved_serial: str | None = None
+    managed_serial = False
+    binding_errors: list[str] = []
+
+    # A function argument is an explicit caller contract and therefore strict.
+    if serial:
+        resolved_serial = _require_serial_for_profile(
+            resolved_adb, serial, profile, source="serial"
         )
+
+    # Environment bindings may be stale after the previous sequential AVD was
+    # stopped. With autoboot enabled, ignore stale bindings and recover by
+    # discovering/booting the correct profile. Without autoboot, report them.
+    if resolved_serial is None and profile_serial:
+        reason = _serial_mismatch_reason(
+            resolved_adb,
+            profile_serial,
+            profile,
+            require_avd_match=True,
+        )
+        if reason is None:
+            resolved_serial = profile_serial
+        else:
+            binding_errors.append(f"{profile_env}={profile_serial}: {reason}")
+
+    if resolved_serial is None and global_serial:
+        reason = _serial_mismatch_reason(
+            resolved_adb,
+            global_serial,
+            profile,
+            require_avd_match=True,
+        )
+        if reason is None:
+            resolved_serial = global_serial
+        else:
+            binding_errors.append(f"{ENV_SERIAL}={global_serial}: {reason}")
+
+    if resolved_serial is None:
+        resolved_serial = _matching_emulator_serial(resolved_adb, profile)
+
+    if resolved_serial is None and autoboot_enabled:
+        resolved_serial = _autoboot(profile, resolved_adb.adb_path)
+        managed_serial = True
+
+    if resolved_serial is None:
+        stale = f" Stale bindings: {'; '.join(binding_errors)}." if binding_errors else ""
+        raise LabEnvironmentError(
+            f"no emulator matching profile {profile.profile_id} "
+            f"(API {profile.api_level}, AVD {_expected_avd_name(profile)!r}); "
+            f"attached emulators: {_attached_emulator_summary(resolved_adb)}."
+            f"{stale} Set {profile_env}, or enable {ENV_AUTOBOOT}=1"
+        )
+
+    _stop_active_if_different(resolved_serial)
+    if _ACTIVE_LEASE is not None:
+        managed_serial = (
+            str(getattr(_ACTIVE_LEASE[1], "serial", "")) == resolved_serial
+        )
+
     if allow_input is None:
         allow_input = os.environ.get(ENV_ALLOW_INPUT) == "1"
     return AdbSettingsEnvironment(
@@ -671,6 +926,11 @@ def create_environment(
             or os.environ.get(ENV_SCREENSHOTS, DEFAULT_SCREENSHOT_DIR)
         ),
         allow_input=bool(allow_input),
+        _close_callback=(
+            (lambda serial=resolved_serial: _release_managed_serial(serial))
+            if managed_serial
+            else None
+        ),
     )
 
 
