@@ -41,6 +41,8 @@ Optional ``student_config`` keys (from ``config/distillation.json``)::
     lora            {rank, alpha, dropout, target_modules}
     speedrun        {lr, warmup_steps, min_lr_frac, total_steps, pack_len,
                      ce_chunk, adam_beta2, grad_clip}
+    resume          load the latest valid adapter checkpoint (default true)
+    resume_checkpoint explicit step-* directory to load instead of latest
 
 The module imports without torch so dry-runs and plugin discovery stay cheap;
 heavy dependencies load lazily inside ``create_student``.
@@ -51,6 +53,8 @@ import hashlib
 import json
 import math
 import random
+import re
+import sys
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import lru_cache
@@ -957,6 +961,130 @@ class SpeedrunLoraUpdater:
 
 
 # ---------------------------------------------------------------------------
+# Checkpoint discovery / resume
+# ---------------------------------------------------------------------------
+
+_CHECKPOINT_DIRECTORY = re.compile(r"step-(\d{8,})$")
+
+
+def _config_bool(value: object, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().casefold()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"boolean configuration expected, got {value!r}")
+
+
+def _adapter_path(directory: Path) -> Path | None:
+    for name in ("adapter_model.safetensors", "adapter_model.bin"):
+        candidate = directory / name
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _checkpoint_step(directory: Path) -> int:
+    match = _CHECKPOINT_DIRECTORY.fullmatch(directory.name)
+    if match is None:
+        raise ValueError(
+            f"resume checkpoint directory must be named step-XXXXXXXX: {directory}"
+        )
+    return int(match.group(1))
+
+
+def _valid_checkpoint(directory: Path) -> bool:
+    try:
+        _checkpoint_step(directory)
+    except ValueError:
+        return False
+    return _adapter_path(directory) is not None
+
+
+def _latest_checkpoint(checkpoint_dir: Path) -> Path | None:
+    if not checkpoint_dir.is_dir():
+        return None
+    candidates = [
+        path
+        for path in checkpoint_dir.iterdir()
+        if path.is_dir() and _valid_checkpoint(path)
+    ]
+    return max(candidates, key=_checkpoint_step) if candidates else None
+
+
+def _resolve_resume_checkpoint(
+    checkpoint_dir: Path,
+    configured: object,
+) -> Path | None:
+    if configured is None or not str(configured).strip():
+        return _latest_checkpoint(checkpoint_dir)
+    directory = Path(str(configured)).expanduser()
+    if not directory.is_dir():
+        raise FileNotFoundError(f"resume checkpoint is not a directory: {directory}")
+    if not _valid_checkpoint(directory):
+        raise RuntimeError(
+            f"resume checkpoint has no valid adapter_model file: {directory}"
+        )
+    return directory
+
+
+def _load_adapter_state(adapter: Path) -> Mapping[str, object]:
+    if adapter.suffix == ".safetensors":
+        try:
+            from safetensors.torch import load_file
+        except ImportError as exc:
+            raise RuntimeError(
+                "safetensors is required to resume this adapter checkpoint"
+            ) from exc
+        return load_file(str(adapter), device="cpu")
+
+    torch = _require_torch()
+    try:
+        return torch.load(adapter, map_location="cpu", weights_only=True)
+    except TypeError:  # torch versions before weights_only
+        return torch.load(adapter, map_location="cpu")
+
+
+def _restore_checkpoint(
+    student: QwenSpeedrunStudent,
+    directory: Path,
+) -> tuple[int, str]:
+    adapter = _adapter_path(directory)
+    if adapter is None:
+        raise RuntimeError(f"adapter checkpoint is missing in {directory}")
+    digest = hashlib.sha256(adapter.read_bytes()).hexdigest()[:24]
+    identifier = directory / "checkpoint.id"
+    expected = (
+        identifier.read_text(encoding="utf-8").strip()
+        if identifier.is_file()
+        else ""
+    )
+    if expected and expected != digest:
+        raise RuntimeError(
+            f"checkpoint digest mismatch for {directory}: expected {expected}, got {digest}"
+        )
+
+    try:
+        from peft import set_peft_model_state_dict
+    except ImportError as exc:
+        raise RuntimeError("peft is required to resume an adapter checkpoint") from exc
+    state = _load_adapter_state(adapter)
+    try:
+        set_peft_model_state_dict(student.model, state, adapter_name="default")
+    except TypeError:  # older peft versions
+        set_peft_model_state_dict(student.model, state)
+
+    step = _checkpoint_step(directory)
+    student._policy_version = step
+    student.model.train()
+    return step, digest
+
+
+# ---------------------------------------------------------------------------
 # Plugin entry point
 # ---------------------------------------------------------------------------
 
@@ -981,13 +1109,34 @@ def create_student(
         seed=seed,
         lora=lora if isinstance(lora, Mapping) else None,
     )
+    checkpoint_dir = Path(output_dir) / "checkpoints"
+    resume_directory = None
+    resume_step = 0
+    resume_digest = ""
+    if _config_bool(config.get("resume"), True):
+        resume_directory = _resolve_resume_checkpoint(
+            checkpoint_dir, config.get("resume_checkpoint")
+        )
+        if resume_directory is not None:
+            resume_step, resume_digest = _restore_checkpoint(
+                student, resume_directory
+            )
+
     speedrun = config.get("speedrun")
     updater = SpeedrunLoraUpdater(
         student,
-        Path(output_dir) / "checkpoints",
+        checkpoint_dir,
         speedrun=speedrun if isinstance(speedrun, Mapping) else None,
         seed=seed,
     )
+    updater.step_count = resume_step
+    if resume_directory is not None:
+        print(
+            f"[RESUME] checkpoint={resume_directory} step={resume_step} "
+            f"id={resume_digest} optimizer_state=fresh",
+            file=sys.stderr,
+            flush=True,
+        )
     return student, updater
 
 
