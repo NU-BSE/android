@@ -35,7 +35,8 @@ and the reference policy is the frozen base model with LoRA adapters disabled.
 Optional ``student_config`` keys (from ``config/distillation.json``)::
 
     model_id        HF id or local path (default Qwen/Qwen2.5-1.5B-Instruct)
-    device          "cuda" | "cpu" | ... (default: cuda when available)
+    device          "cuda" | "cpu" | ... (default: CUDA when available)
+    dtype           fp16/bf16/fp32 alias (Windows CUDA default: float16)
     max_new_tokens  generation budget per proposal (default 128)
     seed            master seed (default 0)
     lora            {rank, alpha, dropout, target_modules}
@@ -52,6 +53,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import random
 import re
 import sys
@@ -73,6 +75,8 @@ from android_drlqn.document_curriculum import CurriculumTask
 from android_drlqn.emulator_lab import EmulatorProfile
 
 DEFAULT_MODEL_ID = "Qwen/Qwen2.5-1.5B-Instruct"
+ENV_STUDENT_DEVICE = "ANDROID_DRLQN_STUDENT_DEVICE"
+ENV_STUDENT_DTYPE = "ANDROID_DRLQN_STUDENT_DTYPE"
 
 # lora-speedrun Track-1 record hyperparameters (submissions/003-pmigdal).
 SPEEDRUN_LORA = {
@@ -121,6 +125,43 @@ _KINDS = tuple(ProposalKind)
 # ---------------------------------------------------------------------------
 # Pure helpers (importable and testable without torch)
 # ---------------------------------------------------------------------------
+
+
+def resolve_student_runtime(
+    config: Mapping[str, object],
+    *,
+    cuda_available: bool,
+    windows_host: bool,
+    environ: Mapping[str, str] | None = None,
+) -> tuple[str, str | None]:
+    """Resolve device/dtype without importing torch at module import time.
+
+    Explicit student config wins over environment variables. Windows CUDA
+    defaults to float16 because it is the stable low-memory choice for RTX
+    consumer GPUs; other hosts keep the model class' existing automatic dtype.
+    """
+    environment = os.environ if environ is None else environ
+    device = str(
+        config.get("device")
+        or environment.get(ENV_STUDENT_DEVICE)
+        or ("cuda" if cuda_available else "cpu")
+    ).strip()
+    if not device:
+        raise ValueError("student device must not be empty")
+    uses_cuda = device.casefold().startswith("cuda")
+    if uses_cuda and not cuda_available:
+        raise RuntimeError(
+            f"student device {device!r} requires a CUDA-enabled PyTorch build "
+            "and a visible NVIDIA GPU"
+        )
+
+    raw_dtype = config.get("dtype") or environment.get(ENV_STUDENT_DTYPE)
+    dtype = str(raw_dtype).strip() if raw_dtype is not None else None
+    if dtype == "":
+        dtype = None
+    if dtype is None and windows_host and uses_cuda:
+        dtype = "float16"
+    return device, dtype
 
 
 def canonical_action_json(
@@ -1101,10 +1142,28 @@ def create_student(
         model_id = candidate if "/" in candidate else DEFAULT_MODEL_ID
     seed = int(config.get("seed", 0))
     lora = config.get("lora")
+    torch = _require_torch()
+    device, dtype = resolve_student_runtime(
+        config,
+        cuda_available=bool(torch.cuda.is_available()),
+        windows_host=os.name == "nt",
+    )
+    accelerator = "cpu"
+    if device.casefold().startswith("cuda"):
+        try:
+            accelerator = str(torch.cuda.get_device_name(0))
+        except Exception:
+            accelerator = "CUDA GPU"
+    print(
+        f"[STUDENT] device={device} dtype={dtype or 'auto'} "
+        f"accelerator={accelerator}",
+        file=sys.stderr,
+        flush=True,
+    )
     student = QwenSpeedrunStudent(
         model_id,
-        device=str(config["device"]) if config.get("device") else None,
-        dtype=str(config["dtype"]) if config.get("dtype") else None,
+        device=device,
+        dtype=dtype,
         max_new_tokens=int(config.get("max_new_tokens", 128)),
         seed=seed,
         lora=lora if isinstance(lora, Mapping) else None,
@@ -1143,6 +1202,8 @@ def create_student(
 __all__ = [
     "ACTION_PREFIX",
     "DEFAULT_MODEL_ID",
+    "ENV_STUDENT_DEVICE",
+    "ENV_STUDENT_DTYPE",
     "SPEEDRUN_LORA",
     "SPEEDRUN_TRAIN",
     "PackedExample",
@@ -1153,6 +1214,7 @@ __all__ = [
     "create_student",
     "pack_examples",
     "parse_action_json",
+    "resolve_student_runtime",
     "sanitize_bbox",
     "speedrun_lr",
     "teacher_completion_text",
