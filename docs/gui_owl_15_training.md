@@ -11,7 +11,8 @@ and verified-receipt boundaries.
 
 ## Interaction contract
 
-`project_gui_owl_train.py` uses the native GUI-Owl flow:
+`project_gui_owl_train.py` implements the native GUI-Owl model/format and
+`project_gui_owl_mrpo_train.py` is the default grouped-rollout factory:
 
 1. The system message defines a bounded mobile action/tool space.
 2. The current user turn contains the task, device/OS scope, current screenshot,
@@ -105,12 +106,15 @@ existing `advantage_clip` setting.
 Every selected group is kept inside one optimizer update. This is important:
 splitting a group across optimizer steps would make its later members stale.
 
-## Token-ID alignment
+## Token-ID and screenshot alignment
 
 The inference continuation token IDs and the exact multimodal prompt messages
-are retained in an in-memory rollout sidecar. The advantage-weighted policy loss
-reuses those IDs rather than decoding and re-tokenizing the sampled action. This
-keeps the trained event aligned with the event executed in the environment.
+are retained in an in-memory rollout sidecar keyed by the exact proposal object.
+The advantage-weighted policy loss reuses those IDs rather than decoding and
+re-tokenizing the sampled action. Each mutable lab screenshot is copied to an
+immutable content-addressed rollout path, preventing later MRPO rollouts from
+overwriting an earlier prompt image. Consumed trace sidecars are deleted after
+the grouped optimizer update.
 
 ## Run
 
@@ -122,5 +126,6 @@ python scripts/train_on_policy_ollama.py \
   --environment-plugin project_lab:create_environment
 ```
 
-The student plugin defaults to `project_gui_owl_train:create_student`. To run the
-legacy text-only baseline, pass `--student-plugin project_train:create_student`.
+The student plugin defaults to
+`project_gui_owl_mrpo_train:create_student`. To run the legacy text-only
+baseline, pass `--student-plugin project_train:create_student`.
