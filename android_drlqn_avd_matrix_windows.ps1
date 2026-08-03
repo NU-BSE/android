@@ -155,7 +155,28 @@ function Get-SystemImagePackage([int]$Api) {
         return $override
     }
 
-    $listing = (& $script:SdkManager --list 2>&1 | Out-String)
+    $previousErrorActionPreference = $ErrorActionPreference
+
+    try {
+        $ErrorActionPreference = "Continue"
+
+        # Redirect stderr inside cmd.exe so PowerShell does not convert
+        # sdkmanager warnings into terminating NativeCommandError records.
+        $listing = (
+            & $env:ComSpec /d /s /c `
+                "`"$script:SdkManager`" --list 2>&1" |
+            Out-String
+        )
+
+        $sdkManagerExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+
+    if ($sdkManagerExitCode -ne 0) {
+        throw "sdkmanager --list failed with exit code $sdkManagerExitCode`n$listing"
+    }
     $apiNames = if ($Api -eq 37) { @("37.0", "37") } else { @([string]$Api) }
     $tags = @("google_apis_ps16k", "google_apis", "default")
     foreach ($apiName in $apiNames) {
