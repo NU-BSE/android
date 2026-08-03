@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a distillation plan or run fixture/plugin-backed on-policy training."""
+"""Build a distillation plan or run grouped fixture/plugin-backed training."""
 from __future__ import annotations
 
 import argparse
@@ -26,9 +26,15 @@ from android_drlqn.distillation import (
     TeacherTarget,
     load_distillation_config,
 )
-from android_drlqn.document_curriculum import CoverageLedger, DocumentationCurriculumBuilder, load_source_registry
+from android_drlqn.document_curriculum import (
+    CoverageLedger,
+    DocumentationCurriculumBuilder,
+    load_source_registry,
+)
 from android_drlqn.emulator_lab import load_emulator_matrix
 from android_drlqn.on_policy import OnPolicyDistiller
+
+DEFAULT_REAL_STUDENT_PLUGIN = "project_gui_owl_mrpo_train:create_student"
 
 
 class FixtureEnvironment:
@@ -45,21 +51,31 @@ class FixtureEnvironment:
 
     def step(self, proposal):
         steps = self.fixture.get("steps") or ()
-        raw = steps[min(self.index, len(steps) - 1)] if steps else {"terminal": True, "verified": True, "reward": 1.0}
+        raw = (
+            steps[min(self.index, len(steps) - 1)]
+            if steps
+            else {"terminal": True, "verified": True, "reward": 1.0}
+        )
         self.index += 1
         next_raw = raw.get("next")
         return EnvironmentOutcome(
             reward=float(raw.get("reward", 0.0)),
             terminal=bool(raw.get("terminal", True)),
             verified=bool(raw.get("verified", False)),
-            next_observation=self._observation(next_raw, self.index) if isinstance(next_raw, dict) else None,
+            next_observation=(
+                self._observation(next_raw, self.index)
+                if isinstance(next_raw, dict)
+                else None
+            ),
             reason=str(raw.get("reason") or ""),
         )
 
     @staticmethod
     def _observation(raw, index):
         return RolloutObservation(
-            screenshot_reference=str(raw.get("screenshot_reference") or f"fixture://screen/{index}"),
+            screenshot_reference=str(
+                raw.get("screenshot_reference") or f"fixture://screen/{index}"
+            ),
             visible_labels=tuple(str(value) for value in raw.get("visible_labels") or ()),
             accessibility_summary=dict(raw.get("accessibility_summary") or {}),
             package=str(raw.get("package") or "com.android.settings"),
@@ -70,7 +86,12 @@ class FixtureEnvironment:
 
 class HttpTransport:
     def __call__(self, endpoint, headers, payload):
-        request = urllib.request.Request(endpoint, data=json.dumps(payload).encode(), headers=dict(headers), method="POST")
+        request = urllib.request.Request(
+            endpoint,
+            data=json.dumps(payload).encode(),
+            headers=dict(headers),
+            method="POST",
+        )
         with urllib.request.urlopen(request, timeout=120) as response:
             value = json.loads(response.read().decode())
         if not isinstance(value, dict):
@@ -91,11 +112,21 @@ def replay_teacher(tasks, matrix):
         for profile in matrix.select_for_os(task.os_family):
             key = f"{task.task_id}:{profile.profile_id}:0"
             judgements[key] = TeacherJudgement(
-                "replay-teacher", 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, True,
+                "replay-teacher",
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                True,
                 TeacherTarget(
                     preferred_kind=ProposalKind.TAP,
-                    target_label=str(task.expected_output.get("display_name") or "") or None,
-                    response=str(task.expected_output.get("display_name") or task.prompt),
+                    target_label=str(task.expected_output.get("display_name") or "")
+                    or None,
+                    response=str(
+                        task.expected_output.get("display_name") or task.prompt
+                    ),
                 ),
                 ("fixture",),
             )
@@ -109,8 +140,19 @@ def main():
     parser.add_argument("--matrix", default="config/emulator_matrix.json")
     parser.add_argument("--config", default="config/distillation.json")
     parser.add_argument("--fixture", help="fixture environment JSON")
-    parser.add_argument("--student-plugin", help="module:factory returning (student, updater)")
-    parser.add_argument("--environment-plugin", help="module:factory(profile) -> environment")
+    parser.add_argument(
+        "--student-plugin",
+        help=(
+            "module:factory returning (student, updater); real environment runs "
+            "default to the MRPO-safe GUI-Owl-1.5-2B-Instruct plugin"
+        ),
+    )
+    parser.add_argument(
+        "--environment-plugin", help="module:factory(profile) -> environment"
+    )
+    parser.add_argument("--mrpo-group-size", type=int, default=2)
+    parser.add_argument("--mrpo-oversample-factor", type=int, default=2)
+    parser.add_argument("--checkpoint-reward-weight", type=float, default=0.5)
     parser.add_argument("--output", default="artifacts/distillation")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
@@ -129,26 +171,41 @@ def main():
     for task in tasks:
         if coverage.entries[task.coverage_id].section.actionable:
             coverage.link_task(task.coverage_id, task.task_id)
-    actionable_tasks = tuple(task for task in tasks if coverage.entries[task.coverage_id].section.actionable)
+    actionable_tasks = tuple(
+        task for task in tasks if coverage.entries[task.coverage_id].section.actionable
+    )
     teacher_config, policy_config, student_config = load_distillation_config(args.config)
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=True)
+    resolved_student_plugin = args.student_plugin or (
+        DEFAULT_REAL_STUDENT_PLUGIN if args.environment_plugin else None
+    )
     plan = {
         "sections": len(sections),
         "actionable_tasks": len(actionable_tasks),
         "emulator_profiles": [profile.profile_id for profile in matrix.profiles],
         "expanded_variants": matrix.report().expanded_variant_count,
         "teacher": teacher_config.profile.value,
-        "teacher_network_ready": teacher_config.profile is not TeacherProfile.FLUX3_EARLY_ACCESS or teacher_config.early_access_acknowledged,
+        "teacher_network_ready": (
+            teacher_config.profile is not TeacherProfile.FLUX3_EARLY_ACCESS
+            or teacher_config.early_access_acknowledged
+        ),
+        "student_plugin": resolved_student_plugin or "numpy-ci-student",
+        "mrpo": {
+            "group_size": args.mrpo_group_size,
+            "oversample_factor": args.mrpo_oversample_factor,
+            "checkpoint_reward_weight": args.checkpoint_reward_weight,
+        },
     }
     (output / "plan.json").write_text(json.dumps(plan, indent=2), encoding="utf-8")
     if args.dry_run:
         print(json.dumps(plan, indent=2))
         return
 
-    if args.student_plugin:
-        student, updater = load_plugin(args.student_plugin)(student_config, output)
+    if resolved_student_plugin:
+        student, updater = load_plugin(resolved_student_plugin)(student_config, output)
     else:
+        # Keep deterministic NumPy weights for fixture-only CI/replay runs.
         student = NumpyLinearStudent(seed=policy_config.seed)
         updater = NumpyPolicyUpdater(student, checkpoint_dir=output / "checkpoints")
 
@@ -158,10 +215,26 @@ def main():
     elif args.fixture:
         environment_factory = lambda profile: FixtureEnvironment(profile, fixture)
     else:
-        raise SystemExit("real training requires --environment-plugin; CI replay requires --fixture")
+        raise SystemExit(
+            "real training requires --environment-plugin; CI replay requires --fixture"
+        )
 
-    teacher = replay_teacher(actionable_tasks, matrix) if teacher_config.profile is TeacherProfile.REPLAY else StrictJsonTeacher(teacher_config, HttpTransport())
-    metrics = OnPolicyDistiller(student, teacher, updater, environment_factory, policy_config, coverage).train(actionable_tasks, matrix)
+    teacher = (
+        replay_teacher(actionable_tasks, matrix)
+        if teacher_config.profile is TeacherProfile.REPLAY
+        else StrictJsonTeacher(teacher_config, HttpTransport())
+    )
+    metrics = OnPolicyDistiller(
+        student,
+        teacher,
+        updater,
+        environment_factory,
+        policy_config,
+        coverage,
+        group_size=args.mrpo_group_size,
+        oversample_factor=args.mrpo_oversample_factor,
+        checkpoint_reward_weight=args.checkpoint_reward_weight,
+    ).train(actionable_tasks, matrix)
     coverage.write_json(output / "coverage.json")
     manifest = DistillationRunManifest.create(
         teacher_config,
@@ -173,10 +246,11 @@ def main():
         metrics.checkpoint_id,
     )
     manifest.write_json(output / "run.json")
-    (output / "metrics.json").write_text(json.dumps(metrics.__dict__, indent=2), encoding="utf-8")
+    (output / "metrics.json").write_text(
+        json.dumps(metrics.__dict__, indent=2), encoding="utf-8"
+    )
     print(json.dumps(metrics.__dict__, indent=2))
 
 
 if __name__ == "__main__":
     main()
-
