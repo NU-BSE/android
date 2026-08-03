@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run OS-aware on-policy Android distillation with local Ollama teachers."""
+"""Run OS-aware grouped on-policy Android distillation with local teachers."""
 from __future__ import annotations
 
 import argparse
@@ -12,12 +12,8 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Callable, Mapping
 
-# Allow repo-root plugin modules (project_train/project_lab) when run as a script.
+# Allow repo-root plugin modules when run as a script.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from android_drlqn.resilient_training import install_resilient_training
-
-install_resilient_training()
 
 from android_drlqn import ollama_runtime as _ollama_runtime
 from android_drlqn.ollama_text_teacher import install_text_only_teacher
@@ -42,6 +38,8 @@ from android_drlqn.model_launch import (
 )
 from android_drlqn.on_policy import OnPolicyDistiller
 
+DEFAULT_STUDENT_PLUGIN = "project_gui_owl_train:create_student"
+
 
 def load_plugin(spec: str):
     module_name, separator, factory_name = spec.partition(":")
@@ -58,11 +56,21 @@ def main() -> None:
     parser.add_argument("--matrix", help="override emulator matrix from launch config")
     parser.add_argument("--distillation-config", help="override distillation config")
     parser.add_argument("--ollama-config", help="override Ollama config")
-    parser.add_argument("--student-plugin", help="module:factory returning (student, updater)")
+    parser.add_argument(
+        "--student-plugin",
+        default=DEFAULT_STUDENT_PLUGIN,
+        help=(
+            "module:factory returning (student, updater); defaults to the "
+            "multimodal GUI-Owl-1.5-2B-Instruct plugin"
+        ),
+    )
     parser.add_argument(
         "--environment-plugin",
         help="module:factory(profile[, os_settings_context]) -> emulator environment",
     )
+    parser.add_argument("--mrpo-group-size", type=int, default=2)
+    parser.add_argument("--mrpo-oversample-factor", type=int, default=2)
+    parser.add_argument("--checkpoint-reward-weight", type=float, default=0.5)
     parser.add_argument("--output", default="artifacts/ollama-distillation")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
@@ -102,6 +110,12 @@ def main() -> None:
             "sections": len(sections),
             "actionable_tasks": len(actionable_tasks),
             "expanded_variants": launch.matrix.report().expanded_variant_count,
+            "student_plugin": args.student_plugin,
+            "mrpo": {
+                "group_size": args.mrpo_group_size,
+                "oversample_factor": args.mrpo_oversample_factor,
+                "checkpoint_reward_weight": args.checkpoint_reward_weight,
+            },
         }
     )
     (output / "plan.json").write_text(json.dumps(plan, indent=2), encoding="utf-8")
@@ -164,6 +178,9 @@ def main() -> None:
             environment_factory,
             launch.policy_for(os_family),
             coverage,
+            group_size=args.mrpo_group_size,
+            oversample_factor=args.mrpo_oversample_factor,
+            checkpoint_reward_weight=args.checkpoint_reward_weight,
         )
         metrics_by_os[os_family] = distiller.train(enriched_tasks, os_matrix)
 
@@ -193,6 +210,7 @@ def main() -> None:
             "profiles": selected_profile_ids,
             "revisions": coverage.pinned_revisions,
             "policies": policy_by_os,
+            "mrpo": plan["mrpo"],
         },
         sort_keys=True,
     )
@@ -202,7 +220,7 @@ def main() -> None:
         teacher_id=teacher_id,
         student_vlm=str(student_config.get("vlm") or "unknown"),
         student_llm=str(student_config.get("llm") or "unknown"),
-        policy_config=policy_by_os,
+        policy_config={**policy_by_os, "mrpo": plan["mrpo"]},
         emulator_profiles=tuple(selected_profile_ids),
         document_revisions=dict(coverage.pinned_revisions),
         checkpoint_id=metrics.checkpoint_id,
@@ -251,4 +269,3 @@ def _block_tasks(
 
 if __name__ == "__main__":
     main()
-
