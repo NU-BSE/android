@@ -8,7 +8,6 @@ from android_drlqn.distillation import (
     NumpyLinearStudent,
     NumpyPolicyUpdater,
     OnPolicyConfig,
-    OnPolicyDistiller,
     ProposalKind,
     ReplayTeacher,
     RolloutObservation,
@@ -28,6 +27,7 @@ from android_drlqn.document_curriculum import (
     SourceDescriptor,
 )
 from android_drlqn.emulator_lab import selected_emulator_matrix
+from android_drlqn.on_policy import OnPolicyDistiller
 
 
 def source():
@@ -98,7 +98,9 @@ def test_numpy_on_policy_update_changes_weights(tmp_path):
     updater = NumpyPolicyUpdater(student, learning_rate=0.1, checkpoint_dir=tmp_path)
     replay = ReplayTeacher({f"task:{profile.profile_id}:0": judgement()})
     metrics = OnPolicyDistiller(student, replay, updater, lambda _: OneStepEnvironment(), OnPolicyConfig(rollout_batch_size=1, max_steps_per_task=1)).train((task(),), one_profile_matrix)
-    assert metrics.rollouts == 1
+    # Default MRPO uses a 2x oversampled two-trajectory group. All-success
+    # collapse keeps SFT active while zeroing policy advantages.
+    assert metrics.rollouts == 4
     assert metrics.updates == 1
     assert metrics.checkpoint_id
     assert student.policy_version == 1

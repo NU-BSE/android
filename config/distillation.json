@@ -1,10 +1,19 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "student": {
-    "vlm": "project-selected-local-vlm",
-    "llm": "project-selected-local-chat-llm",
-    "training_mode": "lora_or_full_finetune",
-    "checkpoint_format": "safetensors_or_framework_state_dict"
+    "model_id": "mPLUG/GUI-Owl-1.5-2B-Instruct",
+    "vlm": "mPLUG/GUI-Owl-1.5-2B-Instruct",
+    "llm": "mPLUG/GUI-Owl-1.5-2B-Instruct",
+    "architecture": "qwen3_vl",
+    "interaction_format": "gui_owl_1_5",
+    "history_n": 4,
+    "coordinate_scale": 1000,
+    "max_new_tokens": 192,
+    "learning_rate": 0.00002,
+    "grad_clip": 1.0,
+    "training_mode": "multimodal_lora",
+    "checkpoint_format": "peft_safetensors",
+    "resume": true
   },
   "teacher": {
     "profile": "flux3_early_access",
