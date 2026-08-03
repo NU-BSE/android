@@ -38,7 +38,7 @@ from android_drlqn.model_launch import (
 )
 from android_drlqn.on_policy import OnPolicyDistiller
 
-DEFAULT_STUDENT_PLUGIN = "project_gui_owl_train:create_student"
+DEFAULT_STUDENT_PLUGIN = "project_gui_owl_mrpo_train:create_student"
 
 
 def load_plugin(spec: str):
@@ -61,7 +61,7 @@ def main() -> None:
         default=DEFAULT_STUDENT_PLUGIN,
         help=(
             "module:factory returning (student, updater); defaults to the "
-            "multimodal GUI-Owl-1.5-2B-Instruct plugin"
+            "MRPO-safe multimodal GUI-Owl-1.5-2B-Instruct plugin"
         ),
     )
     parser.add_argument(
