@@ -1,9 +1,12 @@
+from pathlib import Path
+
 import pytest
 
 from android_drlqn.distillation import ProposalKind, RolloutObservation, TeacherTarget
 from android_drlqn.document_curriculum import CurriculumTask, CurriculumTaskKind
 from android_drlqn.emulator_lab import selected_emulator_matrix
 
+import project_gui_owl_mrpo_train
 import project_gui_owl_train
 from project_gui_owl_train import (
     DEFAULT_MODEL_ID,
@@ -32,9 +35,9 @@ def task():
     )
 
 
-def observation(step=0):
+def observation(step=0, screenshot="/tmp/screen.png"):
     return RolloutObservation(
-        "/tmp/screen.png",
+        screenshot,
         ("Network & internet", "Connected devices", "Privacy"),
         {"node_count": 20},
         "com.android.settings",
@@ -53,6 +56,7 @@ def flatten_text(message):
 
 def test_default_model_is_gui_owl_15_2b_instruct():
     assert DEFAULT_MODEL_ID == "mPLUG/GUI-Owl-1.5-2B-Instruct"
+    assert project_gui_owl_mrpo_train.DEFAULT_MODEL_ID == DEFAULT_MODEL_ID
 
 
 def test_gui_owl_click_output_maps_1000_coordinates_to_normalized_box():
@@ -104,6 +108,19 @@ def test_teacher_output_round_trips_to_safe_action_mapping():
     assert proposal.target_label == "Private DNS"
 
 
+def test_mrpo_snapshot_is_content_addressed_and_immutable(tmp_path):
+    source = tmp_path / "screen.png"
+    source.write_bytes(b"first-frame")
+    snap = project_gui_owl_mrpo_train.MRPOSafeGUIOwlStudent.snapshot_observation(
+        observation(screenshot=str(source))
+    )
+    snapshot_path = Path(snap.screenshot_reference)
+    assert snapshot_path != source
+    assert snapshot_path.read_bytes() == b"first-frame"
+    source.write_bytes(b"second-frame")
+    assert snapshot_path.read_bytes() == b"first-frame"
+
+
 def test_create_student_uses_default_and_allows_override(monkeypatch, tmp_path):
     captured = {}
 
@@ -125,4 +142,28 @@ def test_create_student_uses_default_and_allows_override(monkeypatch, tmp_path):
         {"model_id": "org/custom-gui-owl", "resume": False}, tmp_path
     )
     assert captured["model_id"] == "org/custom-gui-owl"
+    assert captured["checkpoint_dir"] == tmp_path / "checkpoints"
+
+
+def test_mrpo_factory_uses_safe_student_and_updater(monkeypatch, tmp_path):
+    captured = {}
+
+    class FakeSafeStudent:
+        policy_version = 0
+
+        def __init__(self, model_id, **kwargs):
+            captured["model_id"] = model_id
+
+    class FakeSafeUpdater:
+        def __init__(self, student, checkpoint_dir, **kwargs):
+            captured["checkpoint_dir"] = checkpoint_dir
+
+    monkeypatch.setattr(
+        project_gui_owl_mrpo_train, "MRPOSafeGUIOwlStudent", FakeSafeStudent
+    )
+    monkeypatch.setattr(
+        project_gui_owl_mrpo_train, "MRPOSafeGUIOwlLoraUpdater", FakeSafeUpdater
+    )
+    project_gui_owl_mrpo_train.create_student({"resume": False}, tmp_path)
+    assert captured["model_id"] == DEFAULT_MODEL_ID
     assert captured["checkpoint_dir"] == tmp_path / "checkpoints"
