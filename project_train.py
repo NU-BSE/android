@@ -482,7 +482,7 @@ class QwenSpeedrunStudent:
         torch = _require_torch()
         try:
             from peft import LoraConfig, get_peft_model
-            from transformers import AutoModelForCausalLM, AutoTokenizer, set_seed
+            from transformers import AutoModelForImageTextToText, AutoProcessor, set_seed
         except ImportError as exc:
             raise RuntimeError(
                 "project_train requires transformers and peft: pip install -e '.[train]'"
@@ -493,8 +493,9 @@ class QwenSpeedrunStudent:
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.max_new_tokens = int(max_new_tokens)
         self._policy_version = 0
+        self.processor = AutoProcessor.from_pretrained(model_id)
 
-        self.tokenizer = AutoTokenizer.from_pretrained(model_id)
+
         dtype_name = str(dtype).lower() if dtype else None
         dtype_map = {
             "float32": torch.float32,
@@ -511,13 +512,17 @@ class QwenSpeedrunStudent:
         else:
             torch_dtype = torch.bfloat16 if self.device.startswith("cuda") else torch.float32
         try:
-            model = AutoModelForCausalLM.from_pretrained(
-                model_id, torch_dtype=torch_dtype, attn_implementation="sdpa"
+            model = AutoModelForImageTextToText.from_pretrained(
+                model_id,
+                torch_dtype=torch_dtype,
+                attn_implementation="sdpa",
             )
         except TypeError:
             # transformers 5 renamed torch_dtype to dtype.
-            model = AutoModelForCausalLM.from_pretrained(
-                model_id, dtype=torch_dtype, attn_implementation="sdpa"
+            model = AutoModelForImageTextToText.from_pretrained(
+                model_id,
+                dtype=torch_dtype,
+                attn_implementation="sdpa",
             )
 
         lora_cfg = dict(SPEEDRUN_LORA)
