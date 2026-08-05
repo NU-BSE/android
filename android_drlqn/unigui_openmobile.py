@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -99,6 +100,7 @@ def download_unigui_openmobile(
             revision=revision,
             allow_patterns=["README.md", "*/task.json"],
             local_dir=str(destination),
+            token=os.environ.get("HF_TOKEN") or None
         )
     )
     selected: list[str] = []
