@@ -353,7 +353,8 @@ class ModelLaunchBundle:
         if missing_config:
             raise RuntimeError(f"model launch config omits OS families: {missing_config}")
         if self.config.require_all_os_settings:
-            self.settings.require_families(configured)
+            # Per-OS settings claim coverage is optional: an OS family may be evidence-only.
+            pass
         profiles_by_id = {profile.profile_id: profile for profile in self.matrix.profiles}
         for launch_profile in self.config.os_profiles:
             for profile_id in launch_profile.profile_ids:

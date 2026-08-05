@@ -494,6 +494,11 @@ class QwenSpeedrunStudent:
         self.max_new_tokens = int(max_new_tokens)
         self._policy_version = 0
         self.processor = AutoProcessor.from_pretrained(model_id)
+        self.tokenizer = getattr(self.processor, "tokenizer", None)
+        if self.tokenizer is None:
+            raise RuntimeError(
+                "GUI-Owl processor does not expose a text tokenizer"
+            )
 
 
         dtype_name = str(dtype).lower() if dtype else None

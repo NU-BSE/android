@@ -211,6 +211,146 @@ function Set-IniValue([string]$Path, [string]$Name, [string]$Value) {
     Set-Content -LiteralPath $Path -Value $lines -Encoding ASCII
 }
 
+
+function Get-AvdHome {
+    if ($env:ANDROID_AVD_HOME) {
+        return $env:ANDROID_AVD_HOME
+    }
+    return (Join-Path $env:USERPROFILE ".android\avd")
+}
+
+function Get-SystemImageInfo([string]$Package) {
+    $parts = @($Package -split ";")
+    if ($parts.Count -ne 4 -or $parts[0] -ne "system-images") {
+        throw "Invalid system image package id: $Package"
+    }
+
+    $relativePath = Join-Path `
+        (Join-Path (Join-Path "system-images" $parts[1]) $parts[2]) `
+        $parts[3]
+
+    return [pscustomobject]@{
+        Platform = $parts[1]
+        Tag = $parts[2]
+        Abi = $parts[3]
+        RelativePath = $relativePath
+    }
+}
+
+function Get-HardwareGeometry([string]$Device) {
+    switch ($Device) {
+        "pixel_2" {
+            return [pscustomobject]@{ Width = 1080; Height = 1920; Density = 420; Orientation = "portrait" }
+        }
+        "pixel_tablet" {
+            return [pscustomobject]@{ Width = 2560; Height = 1600; Density = 320; Orientation = "landscape" }
+        }
+        "pixel_fold" {
+            return [pscustomobject]@{ Width = 2208; Height = 1840; Density = 420; Orientation = "portrait" }
+        }
+        default {
+            return [pscustomobject]@{ Width = 1080; Height = 2400; Density = 420; Orientation = "portrait" }
+        }
+    }
+}
+
+function New-AvdMetadata($Item, [string]$Package) {
+    # Recent avdmanager versions scan devices.xml from every installed system
+    # image before creating an AVD. Some valid images omit that optional file,
+    # so create the minimal AVD metadata directly instead of invoking the scan.
+    $image = Get-SystemImageInfo $Package
+    $imageDir = Join-Path $script:AndroidSdk $image.RelativePath
+    $userdata = Join-Path $imageDir "userdata.img"
+    $systemImage = Join-Path $imageDir "system.img"
+    $systemQemuImage = Join-Path $imageDir "system-qemu.img"
+
+    if (-not (Test-Path -LiteralPath $imageDir -PathType Container)) {
+        throw "Installed system image directory is missing: $imageDir"
+    }
+    if (-not (Test-Path -LiteralPath $userdata -PathType Leaf)) {
+        throw "System image is incomplete: userdata.img is missing from $imageDir"
+    }
+    if (
+        -not (Test-Path -LiteralPath $systemImage -PathType Leaf) -and
+        -not (Test-Path -LiteralPath $systemQemuImage -PathType Leaf)
+    ) {
+        throw "System image is incomplete: system.img/system-qemu.img is missing from $imageDir"
+    }
+
+    $geometry = Get-HardwareGeometry $Item.Device
+    $avdHome = Get-AvdHome
+    $avdDir = Join-Path $avdHome "$($Item.Avd).avd"
+    $avdIni = Join-Path $avdHome "$($Item.Avd).ini"
+    $config = Join-Path $avdDir "config.ini"
+
+    New-Item -ItemType Directory -Force -Path $avdHome | Out-Null
+
+    # Remove only stale metadata for the exact requested AVD. A valid AVD has
+    # already returned from Test-AvdInstalled before this function is called.
+    if (Test-Path -LiteralPath $avdDir) {
+        Remove-Item -LiteralPath $avdDir -Recurse -Force
+    }
+    if (Test-Path -LiteralPath $avdIni) {
+        Remove-Item -LiteralPath $avdIni -Force
+    }
+
+    New-Item -ItemType Directory -Force -Path $avdDir | Out-Null
+    Copy-Item -LiteralPath $userdata -Destination (Join-Path $avdDir "userdata.img") -Force
+
+    @(
+        "avd.ini.encoding=UTF-8",
+        "path=$avdDir",
+        "path.rel=avd\$($Item.Avd).avd",
+        "target=$($image.Platform)"
+    ) | Set-Content -LiteralPath $avdIni -Encoding ASCII
+
+    $skin = "$($geometry.Width)x$($geometry.Height)"
+    @(
+        "AvdId=$($Item.Avd)",
+        "PlayStore.enabled=false",
+        "abi.type=$($image.Abi)",
+        "avd.ini.displayname=$($Item.Avd)",
+        "avd.ini.encoding=UTF-8",
+        "disk.dataPartition.size=8G",
+        "fastboot.forceColdBoot=yes",
+        "fastboot.forceFastBoot=no",
+        "hw.arc=false",
+        "hw.audioInput=yes",
+        "hw.battery=yes",
+        "hw.camera.back=emulated",
+        "hw.camera.front=emulated",
+        "hw.cpu.arch=$($image.Abi)",
+        "hw.cpu.ncore=4",
+        "hw.device.manufacturer=Google",
+        "hw.device.name=$($Item.Device)",
+        "hw.gps=yes",
+        "hw.gpu.enabled=yes",
+        "hw.gpu.mode=host",
+        "hw.initialOrientation=$($geometry.Orientation)",
+        "hw.keyboard=yes",
+        "hw.lcd.density=$($geometry.Density)",
+        "hw.lcd.height=$($geometry.Height)",
+        "hw.lcd.width=$($geometry.Width)",
+        "hw.mainKeys=no",
+        "hw.ramSize=$($Item.Ram)",
+        "hw.sensors.orientation=yes",
+        "hw.sensors.proximity=yes",
+        "image.sysdir.1=$($image.RelativePath)\",
+        "runtime.network.latency=none",
+        "runtime.network.speed=full",
+        "showDeviceFrame=no",
+        "skin.dynamic=yes",
+        "skin.name=$skin",
+        "skin.path=$skin",
+        "snapshot.present=no",
+        "tag.display=$($image.Tag)",
+        "tag.id=$($image.Tag)",
+        "vm.heapSize=512"
+    ) | Set-Content -LiteralPath $config -Encoding ASCII
+
+    Write-Host "[AVD] Created $($Item.Avd) without avdmanager devices.xml scanning"
+}
+
 function Configure-Avd($Item) {
     $config = Join-Path $env:USERPROFILE ".android\avd\$($Item.Avd).avd\config.ini"
     if (-not (Test-Path -LiteralPath $config)) {
@@ -239,20 +379,8 @@ function Prepare-StockProfile($Item) {
     Write-Host "[SDK] Installing $package"
     Invoke-Checked $script:SdkManager @("platform-tools", "emulator", $package)
 
-    $devices = @($Item.Device, "pixel_8", "pixel_6", "pixel", "Nexus 5X") |
-        Select-Object -Unique
-    $created = $false
-    foreach ($device in $devices) {
-        Write-Host "[AVD] Creating $($Item.Avd) with hardware profile $device"
-        "no" | & $script:AvdManager create avd --force --name $Item.Avd --package $package --device $device
-        if ($LASTEXITCODE -eq 0) {
-            $created = $true
-            break
-        }
-    }
-    if (-not $created) {
-        throw "Unable to create AVD $($Item.Avd)"
-    }
+    Write-Host "[AVD] Creating $($Item.Avd) with hardware profile $($Item.Device)"
+    New-AvdMetadata -Item $Item -Package $package
     Configure-Avd $Item
 }
 

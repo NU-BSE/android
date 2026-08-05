@@ -1126,12 +1126,18 @@ class TextOnlyOllamaTeacher:
         raw_reference = str(reference or "").strip()
         if not raw_reference:
             raise TextOnlyTeacherError("observation screenshot_reference is empty")
+        is_windows_drive_path = (
+            len(raw_reference) >= 3
+            and raw_reference[0].isalpha()
+            and raw_reference[1] == ':'
+            and raw_reference[2] in {'\\', '/'}
+        )
         parsed = urlparse(raw_reference)
-        if parsed.scheme not in {"", "file"}:
+        if not is_windows_drive_path and (parsed.scheme not in {"", "file"}):
             raise TextOnlyTeacherError(
                 "only local screenshot paths are accepted by the text-only teacher"
             )
-        path = Path(parsed.path if parsed.scheme == "file" else raw_reference).expanduser()
+        path = Path(raw_reference if is_windows_drive_path else (parsed.path if parsed.scheme == 'file' else raw_reference)).expanduser()
         if path.is_symlink():
             raise TextOnlyTeacherError("screenshot must be a regular non-symlink file")
         try:

@@ -31,7 +31,7 @@ Configuration (environment variables):
 - ``ANDROID_DRLQN_ALLOW_EMULATOR_INPUT`` -- "1" to permit input injection
 - ``ANDROID_DRLQN_LAB_SCREENSHOTS`` -- screenshot directory
   (default ``artifacts/lab-screenshots``)
-- ``ANDROID_DRLQN_LAB_AUTOBOOT`` -- "1" to manage matching AVDs sequentially:
+- ``ANDROID_DRLQN_LAB_AUTOBOOT`` -- "1" to manage stock android-aosp AVDs sequentially:
   the plugin stops the previous plugin-owned AVD before booting the next one
   (uses ``EmulatorLauncher``; default off)
 - ``ANDROID_DRLQN_ADB`` / ``ANDROID_DRLQN_EMULATOR`` -- tool paths
@@ -897,7 +897,7 @@ def create_environment(
     if resolved_serial is None:
         resolved_serial = _matching_emulator_serial(resolved_adb, profile)
 
-    if resolved_serial is None and autoboot_enabled:
+    if (resolved_serial is None and autoboot_enabled) and profile.os_family == "android-aosp":
         resolved_serial = _autoboot(profile, resolved_adb.adb_path)
         managed_serial = True
 
