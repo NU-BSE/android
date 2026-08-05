@@ -45,7 +45,7 @@ control tools—to Alibaba Model Studio's OpenAI-compatible chat endpoint.
 ```bash
 export DASHSCOPE_API_KEY='...'
 # Prefer a workspace-dedicated Model Studio URL when available.
-export DASHSCOPE_BASE_URL='https://dashscope.aliyuncs.com/compatible-mode/v1'
+export DASHSCOPE_BASE_URL='https://dashscope-intl.aliyuncs.com/api/v1'
 
 python scripts/generate_qwen_screen_chat.py \
   --input artifacts/training/gui-policy-mobileforge.jsonl \
