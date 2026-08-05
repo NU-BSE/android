@@ -3,12 +3,14 @@ name: Dual LoRA data pipelines
 on:
   pull_request:
     paths:
-      - android_drlqn/mobileforge_data.py
+      - android_drlqn/unigui_openmobile.py
+      - android_drlqn/ui_mopd.py
       - android_drlqn/qwen_screen_qa.py
-      - scripts/prepare_mobileforge_gui_policy.py
+      - scripts/prepare_unigui_gui_policy.py
       - scripts/generate_qwen_screen_chat.py
       - scripts/train_gui_owl_adapter.py
-      - tests/test_mobileforge_data.py
+      - tests/test_unigui_openmobile.py
+      - tests/test_ui_mopd.py
       - tests/test_qwen_screen_qa.py
       - tests/test_gui_owl_adapter_data.py
       - config/gui_owl_dual_lora_data.json
@@ -33,14 +35,16 @@ jobs:
       - name: Compile data pipeline modules
         run: |
           python -m py_compile \
-            android_drlqn/mobileforge_data.py \
+            android_drlqn/unigui_openmobile.py \
+            android_drlqn/ui_mopd.py \
             android_drlqn/qwen_screen_qa.py \
-            scripts/prepare_mobileforge_gui_policy.py \
+            scripts/prepare_unigui_gui_policy.py \
             scripts/generate_qwen_screen_chat.py \
             scripts/train_gui_owl_adapter.py
       - name: Run focused tests
         run: |
           python -m pytest -q \
-            tests/test_mobileforge_data.py \
+            tests/test_unigui_openmobile.py \
+            tests/test_ui_mopd.py \
             tests/test_qwen_screen_qa.py \
             tests/test_gui_owl_adapter_data.py

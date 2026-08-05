@@ -1,12 +1,13 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "base_model": "mPLUG/GUI-Owl-1.5-2B-Instruct",
   "adapters": {
     "gui_policy": {
-      "dataset_id": "lgy0404/mobileforge-exploration-trajectories",
-      "package": "com.android.settings",
-      "prepared_jsonl": "artifacts/training/gui-policy-mobileforge.jsonl",
+      "dataset_id": "UI-MOPD/Uni-GUI-OpenMobile",
+      "app": "settings",
+      "prepared_jsonl": "artifacts/training/gui-policy-unigui-openmobile.jsonl",
       "format": "gui_owl_tool_sft",
+      "stage_1_objective": "completion_sft",
       "lora": {
         "rank": 16,
         "alpha": 32,
@@ -42,6 +43,27 @@
           "down_proj"
         ]
       }
+    }
+  },
+  "ui_mopd_stage_2": {
+    "platform_teacher_routing": {
+      "mobile": "gui_policy"
+    },
+    "rollouts_per_prompt": 8,
+    "policy_ratio_clip": {
+      "low": 0.2,
+      "high": 0.28
+    },
+    "reverse_kl": {
+      "estimator": "k3",
+      "coefficient": 0.01,
+      "delta_clip": 20.0,
+      "adaptive_group_reward_threshold": 0.8
+    },
+    "structured_action_reward": {
+      "exact": 1.0,
+      "partial": -0.5,
+      "invalid": -1.0
     }
   }
 }
