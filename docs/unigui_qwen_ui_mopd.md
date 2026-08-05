@@ -64,7 +64,9 @@ those facts to Alibaba Model Studio; it exposes no Android execution tools.
 
 ```bash
 export DASHSCOPE_API_KEY='...'
-export DASHSCOPE_BASE_URL='https://dashscope.aliyuncs.com/compatible-mode/v1'
+# International/Singapore legacy OpenAI-compatible endpoint. For production,
+# prefer the workspace-dedicated compatible-mode URL shown in Model Studio.
+export DASHSCOPE_BASE_URL='https://dashscope-intl.aliyuncs.com/compatible-mode/v1'
 
 python scripts/generate_qwen_screen_chat.py \
   --input artifacts/training/gui-policy-unigui-openmobile.jsonl \
@@ -73,6 +75,10 @@ python scripts/generate_qwen_screen_chat.py \
   --questions-per-screen 4 \
   --resume
 ```
+
+The `/api/v1` DashScope endpoint is not interchangeable with this script's
+OpenAI-compatible Chat Completions transport. The configured base URL must end
+at a compatible-mode API root; the client appends `/chat/completions`.
 
 Requests use JSON-object structured output and disable thinking. Each response
 must match a closed schema containing `question`, `answer`, and one of the
