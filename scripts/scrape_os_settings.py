@@ -168,9 +168,28 @@ STATE_CHANGE_STEP_PATTERN = re.compile(
     re.IGNORECASE,
 )
 PLACEHOLDER_UI_SEGMENT_PATTERN = re.compile(
-    r"^(?:the\s+)?(?:app|device|option|permission|setting|switch|toggle|"
+    r"^(?:the\s+)?(?:app|device|option|permission|setting|switch|toggle|profile|"
     r"timeout\s+timeframe|timeframe)(?:\s+you\s+want(?:\s+to\s+change)?)?$|"
-    r"\b(?:you\s+want|of\s+your\s+choice|you(?:'|’)re\s+concerned\s+about)\b",
+    r"\b(?:you\s+want|of\s+your\s+choice|you(?:'|’)re\s+concerned\s+about|xxx)\b",
+    re.IGNORECASE,
+)
+USER_SPECIFIC_UI_SEGMENT_PATTERN = re.compile(
+    r"^(?:your|my)\b|"
+    r"^(?:the\s+)?(?:account|email\s+address|wi-?fi\s+name|sim\s+card)\s+"
+    r"(?:you|being|related)\b|"
+    r"\b(?:related\s+to|you\s+are\s+troubleshooting)\b",
+    re.IGNORECASE,
+)
+INSTRUCTION_UI_SEGMENT_PATTERN = re.compile(
+    r"^(?:click|refresh|confirm|toggle|switch|enable|disable|turn\s+on|turn\s+off)\b|"
+    r"^(?:to\s+continue|again\s+and)\b|"
+    r"(?:\s*,\s*|\s+)then\s+|\b(?:if\s+needed|using\s+(?:the\s+)?(?:top|bottom)[- ](?:left|right)|"
+    r"again\s+and\s+confirm)\b",
+    re.IGNORECASE,
+)
+UI_CHROME_INSTRUCTION_PATTERN = re.compile(
+    r"^(?:the\s+)?(?:three|3)\s+(?:vertical\s+)?dots(?:\s+on\s+top\s+right)?$|"
+    r"\b(?:top|bottom)[- ](?:left|right)\s+(?:arrow|menu|button|corner)\b",
     re.IGNORECASE,
 )
 AMBIGUOUS_UI_SEGMENT_PATTERN = re.compile(
@@ -314,6 +333,7 @@ class CorpusQualityReport:
     emitted_claim_count: int
     invalid_claim_count: int
     duplicate_claim_count: int
+    duplicate_document_count: int
     structural_error_count: int
     invalid_reasons: tuple[tuple[str, int], ...]
 
@@ -323,6 +343,7 @@ class CorpusQualityReport:
             "emitted_claim_count": self.emitted_claim_count,
             "invalid_claim_count": self.invalid_claim_count,
             "duplicate_claim_count": self.duplicate_claim_count,
+            "duplicate_document_count": self.duplicate_document_count,
             "structural_error_count": self.structural_error_count,
             "invalid_reasons": dict(self.invalid_reasons),
         }
@@ -876,6 +897,12 @@ def normalize_ui_segment(value: str) -> str | None:
         return None
     if PLACEHOLDER_UI_SEGMENT_PATTERN.search(value):
         return None
+    if USER_SPECIFIC_UI_SEGMENT_PATTERN.search(value):
+        return None
+    if INSTRUCTION_UI_SEGMENT_PATTERN.search(value):
+        return None
+    if UI_CHROME_INSTRUCTION_PATTERN.search(value):
+        return None
     if AMBIGUOUS_UI_SEGMENT_PATTERN.search(value):
         return None
     return value
@@ -1107,8 +1134,14 @@ def claim_quality_issues(claim: Mapping[str, object]) -> tuple[str, ...]:
         issues.append("invalid_control_plane")
     if claim.get("required_role") not in {"user", "developer", "device_owner", "root"}:
         issues.append("invalid_required_role")
-    if claim.get("risk_level") not in {"low", "medium", "high"}:
+    risk_level = claim.get("risk_level")
+    if risk_level not in {"low", "medium", "high"}:
         issues.append("invalid_risk_level")
+    elif path:
+        risk_rank = {"low": 0, "medium": 1, "high": 2}
+        minimum_risk = infer_risk_level(" ".join(path))
+        if risk_rank[str(risk_level)] < risk_rank[minimum_risk]:
+            issues.append("risk_level_too_low")
     if not clean_text(str(claim.get("canonical_setting_hint") or "")):
         issues.append("missing_canonical_setting_hint")
     scope = claim.get("scope")
@@ -1138,17 +1171,91 @@ def _remap_section_claim_indexes(
         )
 
 
+
+def _document_identity(item: Mapping[str, object]) -> tuple[str, str] | None:
+    metadata = item.get("document")
+    if not isinstance(metadata, Mapping):
+        return None
+    os_family = clean_text(str(metadata.get("os_family") or "")).casefold()
+    canonical_url = clean_text(str(metadata.get("canonical_url") or ""))
+    if not os_family or not canonical_url:
+        return None
+    return os_family, canonical_url
+
+
+def _document_rank(item: Mapping[str, object], original_index: int) -> tuple[object, ...]:
+    metadata = item.get("document")
+    metadata = metadata if isinstance(metadata, Mapping) else {}
+    claims = item.get("claims")
+    claims = claims if isinstance(claims, list) else []
+    valid_claim_count = sum(
+        1 for claim in claims if isinstance(claim, Mapping) and not claim_quality_issues(claim)
+    )
+    structural_penalty = 0
+    sections = item.get("sections")
+    if not isinstance(sections, list):
+        structural_penalty += 1
+    else:
+        for section in sections:
+            if not isinstance(section, Mapping):
+                structural_penalty += 1
+                continue
+            if not clean_text(str(section.get("section_id") or "")):
+                structural_penalty += 1
+            indexes = section.get("claim_indexes")
+            if not isinstance(indexes, list) or any(
+                not isinstance(index, int) or not 0 <= index < len(claims)
+                for index in (indexes if isinstance(indexes, list) else ())
+            ):
+                structural_penalty += 1
+    try:
+        confidence_tier = int(metadata.get("confidence_tier", 99))
+    except (TypeError, ValueError):
+        confidence_tier = 99
+    return (
+        structural_penalty,
+        -valid_claim_count,
+        confidence_tier,
+        clean_text(str(metadata.get("source_id") or "")),
+        clean_text(str(metadata.get("document_id") or "")),
+        original_index,
+    )
+
+
+def _deduplicate_documents(
+    documents: Sequence[dict[str, object]],
+) -> tuple[list[dict[str, object]], int]:
+    """Keep one deterministic evidence document per OS/canonical URL."""
+    winners: dict[tuple[str, str], tuple[int, tuple[object, ...]]] = {}
+    passthrough: list[int] = []
+    for index, item in enumerate(documents):
+        identity = _document_identity(item)
+        if identity is None:
+            passthrough.append(index)
+            continue
+        rank = _document_rank(item, index)
+        current = winners.get(identity)
+        if current is None or rank < current[1]:
+            winners[identity] = (index, rank)
+    winner_indexes = {index for index, _ in winners.values()}
+    winner_indexes.update(passthrough)
+    output = [item for index, item in enumerate(documents) if index in winner_indexes]
+    return output, len(documents) - len(output)
+
+
 def sanitize_and_deduplicate_documents(
     documents: Sequence[dict[str, object]],
 ) -> tuple[list[dict[str, object]], CorpusQualityReport]:
-    """Remove invalid claims, globally deduplicate paths and remap evidence links."""
+    """Remove invalid claims and globally deduplicate documents and paths."""
     from collections import Counter
 
+    documents, duplicate_document_count = _deduplicate_documents(documents)
     occurrences: list[tuple[int, int, tuple[str, ...], tuple[object, ...]]] = []
     invalid: set[tuple[int, int]] = set()
     reason_counts: Counter[str] = Counter()
     input_claim_count = 0
     structural_error_count = 0
+    global_section_owners: dict[str, int] = {}
 
     for document_index, item in enumerate(documents):
         metadata = item.get("document") or {}
@@ -1187,6 +1294,12 @@ def sanitize_and_deduplicate_documents(
                 reason_counts["duplicate_section_id"] += 1
             else:
                 section_ids.add(section_id)
+                owner = global_section_owners.get(section_id)
+                if owner is not None and owner != document_index:
+                    structural_error_count += 1
+                    reason_counts["duplicate_global_section_id"] += 1
+                else:
+                    global_section_owners[section_id] = document_index
             indexes = section.get("claim_indexes") or []
             if not isinstance(indexes, list):
                 structural_error_count += 1
@@ -1261,6 +1374,7 @@ def sanitize_and_deduplicate_documents(
         emitted_claim_count=sum(len(item.get("claims") or []) for item in output),
         invalid_claim_count=len(invalid),
         duplicate_claim_count=duplicate_count,
+        duplicate_document_count=duplicate_document_count,
         structural_error_count=structural_error_count,
         invalid_reasons=tuple(sorted(reason_counts.items())),
     )
@@ -1291,10 +1405,16 @@ def infer_risk_level(text: str) -> str:
     lowered = text.lower()
     if any(token in lowered for token in ("factory reset", "erase", "wipe", "unlock bootloader", "root", "encryption key")):
         return "high"
-    if any(token in lowered for token in ("permission", "security", "privacy", "location", "network", "vpn", "developer options", "debugging")):
+    if any(
+        token in lowered
+        for token in (
+            "permission", "security", "privacy", "location", "network", "vpn",
+            "developer options", "debugging", "clear storage", "clear data",
+            "delete data", "remove account", "forget network",
+        )
+    ):
         return "medium"
     return "low"
-
 
 def choose_section_class(classes: Sequence[str], text: str) -> str:
     inferred = infer_document_classes(
