@@ -87,24 +87,107 @@ RELEVANT_PATH_PARTS = (
     "readme",
     "license",
 )
-ACTION_WORDS = re.compile(
-    r"\b(enable|disable|turn on|turn off|open|tap|select|choose|configure|"
-    r"allow|deny|reset|manage)\b",
-    re.IGNORECASE,
-)
-SETTING_SIGNALS = re.compile(
-    r"\b(setting|settings|preference|preferences|permission|permissions|toggle|switch|"
-    r"privacy|security|developer options?|network|location|notification)\b",
-    re.IGNORECASE,
-)
+# Claims are deliberately extracted from explicit Android Settings breadcrumbs.
+# General settings prose, code, XML and API references remain evidence-only.
 UI_PATH_PATTERN = re.compile(
-    r"(?:go to|open|navigate to)?\s*(?:the\s+)?settings\s*(?:app\s*)?"
-    r"(?:>|→|›|/|\\|then|and then|:)\s*([^\n.;]{2,240})",
+    r"(?:^|[.!?:]\s+|(?:go\s+to|open|navigate\s+to|from)\s+)"
+    r"(?:the\s+)?settings(?:\s+app)?\s*(?:>|→|›)\s*"
+    r"(?P<tail>[^\n.;]{2,320})",
     re.IGNORECASE,
 )
-SPLIT_PATH_PATTERN = re.compile(r"\s*(?:>|→|›|/|\\|\bthen\b|\band then\b)\s*", re.IGNORECASE)
+SECOND_SETTINGS_PATH_PATTERN = re.compile(
+    r"\b(?:and|or)?\s*(?:open\s+)?settings(?:\s+app)?\s*(?:>|→|›)",
+    re.IGNORECASE,
+)
+SPLIT_PATH_PATTERN = re.compile(r"\s*(?:>|→|›)\s*")
+NAVIGATION_ACTION_SEPARATOR = re.compile(
+    r"(?:,\s*|\s+(?:and\s+then|then|and)\s+)"
+    r"(?:tap|select|choose|open|pick)\s+",
+    re.IGNORECASE,
+)
+ACTION_CLAUSE_PATTERN = re.compile(
+    r"\s*(?:,\s*(?:then\s+)?|(?:and\s+then|then|and)\s+)"
+    r"(?:enable|disable|turn\s+on|turn\s+off|allow|deny|toggle|switch|"
+    r"check|uncheck|press|long[- ]press|reboot|restart|wait)\b.*$",
+    re.IGNORECASE,
+)
+TRAILING_TAP_COUNT_PATTERN = re.compile(
+    r"\s+(?:once|twice|\d+|one|two|three|four|five|six|seven|eight|nine|ten)"
+    r"\s+times?\b.*$",
+    re.IGNORECASE,
+)
+ACTION_PARENTHETICAL_PATTERN = re.compile(
+    r"\s*\((?:enabled|disabled|previously|if\b|after\b)[^)]*\)?\s*$",
+    re.IGNORECASE,
+)
+MARKDOWN_LINK_PATTERN = re.compile(r"\[([^]\n]+)\]\([^)\n]+\)")
+TECHNICAL_UI_SEGMENT_PATTERN = re.compile(
+    r"(?:[<>{}\[\]]|https?://|(?:android|settings|app):[a-z_]|"
+    r"(?:controller|fragment|class|key|resource)\s*=|@[a-z_]|"
+    r"(?:com|org|net)\.[a-z0-9_.]+|Preference(?:Screen|Category)?|"
+    r"SwitchPreference|TextView|xmlns(?::android)?)",
+    re.IGNORECASE,
+)
+SENTENCE_UI_SEGMENT_PATTERN = re.compile(
+    r"\b(?:will|should|must|would|could|requires?|used\s+to|"
+    r"before\s+trying|after\s+you|when\s+you)\b",
+    re.IGNORECASE,
+)
+NAV_TARGET_PREFIX_PATTERN = re.compile(
+    r"^(?:tap|select|choose|pick)\s+", re.IGNORECASE
+)
+LEADING_NON_LABEL_PATTERN = re.compile(
+    r"^(?:enable|disable|turn|allow|deny|wait|reboot|restart)\b",
+    re.IGNORECASE,
+)
+NON_ANDROID_UI_SEGMENT_PATTERN = re.compile(
+    r"\b(?:icloud|apple\s+id|face\s+id|touch\s+id|iphone|ipad|ios)\b",
+    re.IGNORECASE,
+)
+FENCED_CODE_PATTERN = re.compile(r"^\s*(```|~~~)")
+ORDERED_STEP_MARKER_PATTERN = re.compile(
+    r"(?:^|\s)(?:\d{1,2}[.)]|[-*•])\s+"
+)
+SETTINGS_OPEN_STEP_PATTERN = re.compile(
+    r"^(?:on\s+(?:your|the)\s+(?:android\s+)?(?:device|phone),?\s+)?"
+    r"(?:open|launch|go\s+to)\s+(?:your|the)?\s*settings(?:\s+app)?\b",
+    re.IGNORECASE,
+)
+NAVIGATION_STEP_PATTERN = re.compile(
+    r"^(?:then\s+)?(?:tap|select|choose|pick|open|press|go\s+to)\s+(?P<label>.+)$",
+    re.IGNORECASE,
+)
+NESTED_NAVIGATION_STEP_PATTERN = re.compile(
+    r"^(?:under|in)\s+[^,]{1,72},\s*"
+    r"(?:tap|select|choose|pick|open|press)\s+(?P<label>.+)$",
+    re.IGNORECASE,
+)
+STATE_CHANGE_STEP_PATTERN = re.compile(
+    r"^(?:then\s+)?(?:enable|disable|turn\s+on|turn\s+off|allow|deny|"
+    r"toggle|switch|check|uncheck|reboot|restart|wait)\b",
+    re.IGNORECASE,
+)
+PLACEHOLDER_UI_SEGMENT_PATTERN = re.compile(
+    r"^(?:the\s+)?(?:app|device|option|permission|setting|switch|toggle|"
+    r"timeout\s+timeframe|timeframe)(?:\s+you\s+want(?:\s+to\s+change)?)?$|"
+    r"\b(?:you\s+want|of\s+your\s+choice|you(?:'|’)re\s+concerned\s+about)\b",
+    re.IGNORECASE,
+)
+AMBIGUOUS_UI_SEGMENT_PATTERN = re.compile(
+    r"\b(?:or|depending\s+on|if\s+you\s+can(?:not|'t))\b",
+    re.IGNORECASE,
+)
 WHITESPACE = re.compile(r"\s+")
+UI_TRIM_CHARS = " \t\r\n.,:;!?*`_\"'“”‘’()[]"
 SLUG_CHARS = re.compile(r"[^a-z0-9]+")
+CLAIM_DENY_SUFFIXES = {
+    ".c", ".cc", ".cpp", ".gradle", ".h", ".java", ".json", ".kt",
+    ".kts", ".properties", ".py", ".toml", ".xml", ".yaml", ".yml",
+}
+GENERIC_TERMINAL_LABELS = {
+    "button", "click here", "here", "it", "option", "setting", "settings",
+    "switch", "the option", "the setting", "the switch", "the toggle", "toggle",
+}
 
 
 class ScrapeError(RuntimeError):
@@ -220,6 +303,32 @@ class TextBlock:
 
 
 @dataclass(frozen=True)
+class UiPathCandidate:
+    path: tuple[str, ...]
+    evidence_text: str
+
+
+@dataclass(frozen=True)
+class CorpusQualityReport:
+    input_claim_count: int
+    emitted_claim_count: int
+    invalid_claim_count: int
+    duplicate_claim_count: int
+    structural_error_count: int
+    invalid_reasons: tuple[tuple[str, int], ...]
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "input_claim_count": self.input_claim_count,
+            "emitted_claim_count": self.emitted_claim_count,
+            "invalid_claim_count": self.invalid_claim_count,
+            "duplicate_claim_count": self.duplicate_claim_count,
+            "structural_error_count": self.structural_error_count,
+            "invalid_reasons": dict(self.invalid_reasons),
+        }
+
+
+@dataclass(frozen=True)
 class SourceResult:
     source: SourceSpec
     revision: str
@@ -242,7 +351,7 @@ class _PageParser(HTMLParser):
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         lowered = tag.lower()
-        if lowered in {"script", "style", "svg", "noscript", "template"}:
+        if lowered in {"script", "style", "svg", "noscript", "template", "pre"}:
             self._skip_depth += 1
             return
         if self._skip_depth:
@@ -253,12 +362,12 @@ class _PageParser(HTMLParser):
                 self.links.append(href)
         if re.fullmatch(r"h[1-6]", lowered):
             self._start_capture(lowered, int(lowered[1]))
-        elif lowered in {"p", "li", "pre", "code", "dt", "dd", "td", "th"}:
+        elif lowered in {"p", "li", "code", "dt", "dd", "td", "th"}:
             self._start_capture(lowered, None)
 
     def handle_endtag(self, tag: str) -> None:
         lowered = tag.lower()
-        if lowered in {"script", "style", "svg", "noscript", "template"}:
+        if lowered in {"script", "style", "svg", "noscript", "template", "pre"}:
             if self._skip_depth:
                 self._skip_depth -= 1
             return
@@ -584,11 +693,12 @@ def text_blocks(document: RawDocument) -> tuple[TextBlock, ...]:
     text = document.body.decode("utf-8", errors="replace")
     if "html" in document.media_type:
         parsed = parse_html(document.body)
-        if parsed.blocks:
-            return tuple(parsed.blocks)
+        return tuple(parsed.blocks)
     blocks: list[TextBlock] = []
     heading_path: list[str] = []
     paragraph: list[str] = []
+    fenced_code_marker: str | None = None
+    saw_fenced_code = False
 
     def flush() -> None:
         value = clean_text(" ".join(paragraph))
@@ -598,6 +708,18 @@ def text_blocks(document: RawDocument) -> tuple[TextBlock, ...]:
 
     for line in text.splitlines():
         stripped = line.strip()
+        fence = FENCED_CODE_PATTERN.match(stripped)
+        if fence:
+            marker = fence.group(1)
+            if fenced_code_marker is None:
+                flush()
+                fenced_code_marker = marker
+                saw_fenced_code = True
+            elif marker == fenced_code_marker:
+                fenced_code_marker = None
+            continue
+        if fenced_code_marker is not None:
+            continue
         markdown = re.match(r"^(#{1,6})\s+(.+)$", stripped)
         if markdown:
             flush()
@@ -608,10 +730,15 @@ def text_blocks(document: RawDocument) -> tuple[TextBlock, ...]:
             heading_path.append(clean_text(markdown.group(2)))
         elif not stripped:
             flush()
+        elif line.startswith(("    ", "\t")) and any(
+            token in stripped for token in ("<Preference", "android:", "settings:", "controller=")
+        ):
+            # Indented Android source/resource snippets are evidence, not UI prose.
+            flush()
         else:
             paragraph.append(stripped)
     flush()
-    if not blocks and clean_text(text):
+    if not blocks and clean_text(text) and not saw_fenced_code:
         blocks.append(TextBlock((), clean_text(text)))
     return tuple(blocks)
 
@@ -707,11 +834,192 @@ def infer_document_classes(document: RawDocument, blocks: Sequence[TextBlock]) -
     return tuple(sorted(classes or {"informational"}))
 
 
+def claim_source_eligible(document: RawDocument) -> bool:
+    """Return whether a document may emit UI-groundable training claims.
+
+    Code, resources, machine-readable files and Android API references are kept
+    in the evidence corpus but cannot become visible Settings targets.
+    """
+    canonical = document.canonical_url.casefold()
+    relative = (document.relative_path or "").replace("\\", "/")
+    suffix = Path(relative).suffix.casefold() if relative else ""
+    if suffix in CLAIM_DENY_SUFFIXES:
+        return False
+    if document.media_type.casefold() in {"application/json", "application/xml", "text/xml"}:
+        return False
+    if "/reference/" in canonical or document.source_key.casefold().endswith("_api"):
+        return False
+    return True
+
+
+def normalize_ui_segment(value: str) -> str | None:
+    value = MARKDOWN_LINK_PATTERN.sub(r"\1", value)
+    value = clean_text(value).strip(UI_TRIM_CHARS)
+    value = NAV_TARGET_PREFIX_PATTERN.sub("", value)
+    value = ACTION_PARENTHETICAL_PATTERN.sub("", value)
+    value = ACTION_CLAUSE_PATTERN.sub("", value)
+    value = TRAILING_TAP_COUNT_PATTERN.sub("", value)
+    value = clean_text(value).strip(UI_TRIM_CHARS)
+    if not value or not 1 < len(value) <= 72:
+        return None
+    if len(value.split()) > 10:
+        return None
+    if not any(character.isalpha() for character in value):
+        return None
+    if TECHNICAL_UI_SEGMENT_PATTERN.search(value):
+        return None
+    if SENTENCE_UI_SEGMENT_PATTERN.search(value):
+        return None
+    if LEADING_NON_LABEL_PATTERN.search(value) and value[:1].islower():
+        return None
+    if NON_ANDROID_UI_SEGMENT_PATTERN.search(value):
+        return None
+    if PLACEHOLDER_UI_SEGMENT_PATTERN.search(value):
+        return None
+    if AMBIGUOUS_UI_SEGMENT_PATTERN.search(value):
+        return None
+    return value
+
+
+def ui_path_quality_issues(path: Sequence[object]) -> tuple[str, ...]:
+    issues: list[str] = []
+    values = [clean_text(str(value)) for value in path]
+    if not 2 <= len(values) <= 8:
+        issues.append("path_length")
+        return tuple(issues)
+    if values[0] != "Settings":
+        issues.append("path_root")
+    normalized: list[str] = []
+    for value in values[1:]:
+        label = normalize_ui_segment(value)
+        if label is None or label != value:
+            issues.append("invalid_segment")
+            continue
+        normalized.append(label.casefold())
+    if normalized and normalized[-1] in GENERIC_TERMINAL_LABELS:
+        issues.append("generic_terminal")
+    if any(left == right for left, right in zip(normalized, normalized[1:])):
+        issues.append("repeated_segment")
+    return tuple(sorted(set(issues)))
+
+
+def extract_ui_paths(text: str) -> tuple[UiPathCandidate, ...]:
+    candidates: list[UiPathCandidate] = []
+    seen: set[tuple[str, ...]] = set()
+    for match in UI_PATH_PATTERN.finditer(text):
+        tail = clean_text(match.group("tail"))
+        if SECOND_SETTINGS_PATH_PATTERN.search(tail):
+            continue
+        # Navigation verbs may introduce the next visible label. State-changing
+        # verbs are removed by normalize_ui_segment and never become labels.
+        tail = NAVIGATION_ACTION_SEPARATOR.sub(" > ", tail)
+        values: list[str] = []
+        invalid_segment = False
+        for raw_value in SPLIT_PATH_PATTERN.split(tail):
+            value = normalize_ui_segment(raw_value)
+            if value is None:
+                invalid_segment = True
+                break
+            values.append(value)
+        if invalid_segment:
+            continue
+        path = ("Settings", *values[:7])
+        if ui_path_quality_issues(path) or path in seen:
+            continue
+        seen.add(path)
+        candidates.append(UiPathCandidate(path=path, evidence_text=clean_text(match.group(0))))
+    return tuple(candidates)
+
+
+def _split_procedure_steps(text: str) -> tuple[str, ...]:
+    """Split numbered or bulleted prose without treating ordinary sentences as steps."""
+    cleaned = clean_text(text)
+    matches = list(ORDERED_STEP_MARKER_PATTERN.finditer(cleaned))
+    if not matches:
+        return (cleaned,) if cleaned else ()
+    steps: list[str] = []
+    prefix = clean_text(cleaned[: matches[0].start()])
+    if prefix:
+        steps.append(prefix)
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(cleaned)
+        value = clean_text(cleaned[match.end() : end])
+        if value:
+            steps.append(value)
+    return tuple(steps)
+
+
+def extract_stepwise_ui_paths(blocks: Sequence[TextBlock]) -> tuple[UiPathCandidate, ...]:
+    """Extract Settings routes from ordered user-guide procedures.
+
+    This supports official guides that express a route as consecutive steps,
+    for example ``Open Settings`` followed by ``Select Connected Devices`` and
+    ``Select Bluetooth timeout``. The sequence must start explicitly in the
+    Settings app. Ambiguous, placeholder and state-changing steps terminate the
+    route rather than becoming UI labels.
+    """
+    steps: list[str] = []
+    for block in blocks:
+        steps.extend(_split_procedure_steps(block.text))
+
+    candidates: list[UiPathCandidate] = []
+    seen: set[tuple[str, ...]] = set()
+    for start_index, step in enumerate(steps):
+        if not SETTINGS_OPEN_STEP_PATTERN.search(step):
+            continue
+        labels: list[str] = []
+        evidence = [step]
+        for next_step in steps[start_index + 1 : start_index + 9]:
+            value = clean_text(next_step)
+            if SETTINGS_OPEN_STEP_PATTERN.search(value) or STATE_CHANGE_STEP_PATTERN.search(value):
+                break
+            match = NAVIGATION_STEP_PATTERN.match(value) or NESTED_NAVIGATION_STEP_PATTERN.match(value)
+            if not match:
+                break
+            label = normalize_ui_segment(match.group("label"))
+            if label is None:
+                break
+            labels.append(label)
+            evidence.append(value)
+        if not labels:
+            continue
+        path = ("Settings", *labels[:7])
+        if ui_path_quality_issues(path) or path in seen:
+            continue
+        seen.add(path)
+        candidates.append(
+            UiPathCandidate(path=path, evidence_text=clean_text(" ".join(evidence)))
+        )
+    return tuple(candidates)
+
+
+def extract_ui_paths_from_blocks(blocks: Sequence[TextBlock]) -> tuple[UiPathCandidate, ...]:
+    """Merge explicit breadcrumbs and ordered procedures, preserving quality gates."""
+    combined = clean_text(" ".join(block.text for block in blocks))
+    merged = [*extract_ui_paths(combined), *extract_stepwise_ui_paths(blocks)]
+    output: list[UiPathCandidate] = []
+    seen: set[tuple[str, ...]] = set()
+    for candidate in merged:
+        key = tuple(value.casefold() for value in candidate.path)
+        if key in seen:
+            continue
+        seen.add(key)
+        output.append(candidate)
+    return tuple(output)
+
+
+def extract_ui_path(text: str) -> list[str]:
+    """Compatibility wrapper returning the first high-quality Settings path."""
+    candidates = extract_ui_paths(text)
+    return list(candidates[0].path) if candidates else []
+
+
 def normalize_document(source: SourceSpec, document: RawDocument) -> dict[str, object]:
     blocks = text_blocks(document)
     classes = infer_document_classes(document, blocks)
     claims: list[dict[str, object]] = []
     sections: list[dict[str, object]] = []
+    seen_claim_keys: set[tuple[str, ...]] = set()
     groups: dict[tuple[str, ...], list[TextBlock]] = {}
     for block in blocks:
         groups.setdefault(block.heading_path, []).append(block)
@@ -719,35 +1027,39 @@ def normalize_document(source: SourceSpec, document: RawDocument) -> dict[str, o
         groups[()] = []
     for ordinal, (heading_path, grouped_blocks) in enumerate(groups.items()):
         combined = clean_text(" ".join(block.text for block in grouped_blocks))
-        heading = next((value for value in reversed(heading_path) if value), "")
         section_id = stable_id(document.canonical_url, "/".join(heading_path), str(ordinal))
         claim_indexes: list[int] = []
-        path = extract_ui_path(combined)
-        # A setting_variant is UI-groundable only when the source contains an explicit path.
-        # Descriptive settings prose without a path remains evidence, but is not emitted
-        # as a claim that downstream curriculum code could mistake for a visible target.
-        actionable = bool(path) and bool(heading or combined)
-        if actionable:
-            display_name = clean_text(heading or (path[-1] if path else combined[:100]))[:160]
-            if display_name:
-                claim_indexes.append(len(claims))
-                claims.append(
-                    {
-                        "claim_kind": "setting_variant",
-                        "canonical_setting_hint": f"{source.os_family}.{slugify(display_name)}",
-                        "display_name": display_name,
-                        "ui_path": path,
-                        "control_plane": "settings_ui",
-                        "required_role": infer_required_role(combined),
-                        "risk_level": infer_risk_level(combined),
-                        "scope": {
-                            "os_family": source.os_family,
-                            "source_key": source.source_key,
-                            "canonical_url": document.canonical_url,
-                            "section_id": section_id,
-                        },
-                    }
-                )
+        candidates = (
+            extract_ui_paths_from_blocks(grouped_blocks)
+            if claim_source_eligible(document)
+            else ()
+        )
+        for candidate in candidates:
+            path_key = tuple(value.casefold() for value in candidate.path)
+            if path_key in seen_claim_keys:
+                continue
+            seen_claim_keys.add(path_key)
+            display_name = candidate.path[-1]
+            claim_indexes.append(len(claims))
+            claims.append(
+                {
+                    "claim_kind": "setting_variant",
+                    "canonical_setting_hint": (
+                        f"{source.os_family}.{slugify('.'.join(candidate.path[1:]))}"
+                    ),
+                    "display_name": display_name,
+                    "ui_path": list(candidate.path),
+                    "control_plane": "settings_ui",
+                    "required_role": infer_required_role(candidate.evidence_text),
+                    "risk_level": infer_risk_level(candidate.evidence_text),
+                    "scope": {
+                        "os_family": source.os_family,
+                        "source_key": source.source_key,
+                        "canonical_url": document.canonical_url,
+                        "section_id": section_id,
+                    },
+                }
+            )
         sections.append(
             {
                 "section_id": section_id,
@@ -780,14 +1092,188 @@ def normalize_document(source: SourceSpec, document: RawDocument) -> dict[str, o
     }
 
 
-def extract_ui_path(text: str) -> list[str]:
-    match = UI_PATH_PATTERN.search(text)
-    if not match:
-        return []
-    tail = match.group(1)
-    values = [clean_text(value.strip(" .,:;()[]")) for value in SPLIT_PATH_PATTERN.split(tail)]
-    values = [value for value in values if 1 < len(value) <= 100]
-    return ["Settings", *values[:7]] if values else []
+def claim_quality_issues(claim: Mapping[str, object]) -> tuple[str, ...]:
+    issues: list[str] = []
+    if claim.get("claim_kind") != "setting_variant":
+        return ()
+    raw_path = claim.get("ui_path")
+    if not isinstance(raw_path, (list, tuple)):
+        return ("missing_path",)
+    path = [clean_text(str(value)) for value in raw_path]
+    issues.extend(ui_path_quality_issues(path))
+    if path and clean_text(str(claim.get("display_name") or "")) != path[-1]:
+        issues.append("display_name_mismatch")
+    if claim.get("control_plane") != "settings_ui":
+        issues.append("invalid_control_plane")
+    if claim.get("required_role") not in {"user", "developer", "device_owner", "root"}:
+        issues.append("invalid_required_role")
+    if claim.get("risk_level") not in {"low", "medium", "high"}:
+        issues.append("invalid_risk_level")
+    if not clean_text(str(claim.get("canonical_setting_hint") or "")):
+        issues.append("missing_canonical_setting_hint")
+    scope = claim.get("scope")
+    if not isinstance(scope, Mapping) or not scope.get("os_family") or not scope.get("section_id"):
+        issues.append("invalid_scope")
+    return tuple(sorted(set(issues)))
+
+
+def _remap_section_claim_indexes(
+    document: dict[str, object], old_to_new: Mapping[int, int]
+) -> None:
+    sections = document.get("sections") or []
+    if not isinstance(sections, list):
+        raise ScrapeError("normalized document sections must be a list")
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        indexes = section.get("claim_indexes") or []
+        if not isinstance(indexes, list):
+            indexes = []
+        section["claim_indexes"] = list(
+            dict.fromkeys(
+                old_to_new[index]
+                for index in indexes
+                if isinstance(index, int) and index in old_to_new
+            )
+        )
+
+
+def sanitize_and_deduplicate_documents(
+    documents: Sequence[dict[str, object]],
+) -> tuple[list[dict[str, object]], CorpusQualityReport]:
+    """Remove invalid claims, globally deduplicate paths and remap evidence links."""
+    from collections import Counter
+
+    occurrences: list[tuple[int, int, tuple[str, ...], tuple[object, ...]]] = []
+    invalid: set[tuple[int, int]] = set()
+    reason_counts: Counter[str] = Counter()
+    input_claim_count = 0
+    structural_error_count = 0
+
+    for document_index, item in enumerate(documents):
+        metadata = item.get("document") or {}
+        if not isinstance(metadata, Mapping):
+            raise ScrapeError("normalized document metadata must be an object")
+        for field in ("source_id", "document_id", "canonical_url", "os_family"):
+            if not clean_text(str(metadata.get(field) or "")):
+                structural_error_count += 1
+                reason_counts[f"missing_document_{field}"] += 1
+        try:
+            confidence_tier = int(metadata.get("confidence_tier", 99))
+        except (TypeError, ValueError):
+            confidence_tier = 99
+            structural_error_count += 1
+            reason_counts["invalid_confidence_tier"] += 1
+
+        claims = item.get("claims") or []
+        if not isinstance(claims, list):
+            raise ScrapeError("normalized document claims must be a list")
+        sections = item.get("sections") or []
+        if not isinstance(sections, list):
+            raise ScrapeError("normalized document sections must be a list")
+        section_ids: set[str] = set()
+        referenced_claim_indexes: set[int] = set()
+        for section in sections:
+            if not isinstance(section, Mapping):
+                structural_error_count += 1
+                reason_counts["section_not_object"] += 1
+                continue
+            section_id = clean_text(str(section.get("section_id") or ""))
+            if not section_id:
+                structural_error_count += 1
+                reason_counts["missing_section_id"] += 1
+            elif section_id in section_ids:
+                structural_error_count += 1
+                reason_counts["duplicate_section_id"] += 1
+            else:
+                section_ids.add(section_id)
+            indexes = section.get("claim_indexes") or []
+            if not isinstance(indexes, list):
+                structural_error_count += 1
+                reason_counts["claim_indexes_not_list"] += 1
+                continue
+            for index in indexes:
+                if not isinstance(index, int) or not 0 <= index < len(claims):
+                    structural_error_count += 1
+                    reason_counts["broken_section_index"] += 1
+                else:
+                    referenced_claim_indexes.add(index)
+
+        document_os = clean_text(str(metadata.get("os_family") or ""))
+        document_source = clean_text(str(metadata.get("source_id") or ""))
+        for claim_index, claim in enumerate(claims):
+            input_claim_count += 1
+            if not isinstance(claim, Mapping):
+                invalid.add((document_index, claim_index))
+                reason_counts["claim_not_object"] += 1
+                continue
+            issues = list(claim_quality_issues(claim))
+            scope = claim.get("scope")
+            if isinstance(scope, Mapping):
+                if clean_text(str(scope.get("os_family") or "")) != document_os:
+                    issues.append("scope_os_mismatch")
+                if clean_text(str(scope.get("source_key") or "")) != document_source:
+                    issues.append("scope_source_mismatch")
+                if clean_text(str(scope.get("section_id") or "")) not in section_ids:
+                    issues.append("scope_section_missing")
+            if claim_index not in referenced_claim_indexes:
+                issues.append("unreferenced_claim")
+            if issues:
+                invalid.add((document_index, claim_index))
+                reason_counts.update(set(issues))
+                continue
+            path = tuple(clean_text(str(value)).casefold() for value in claim["ui_path"])
+            os_family = document_os.casefold()
+            key = (os_family, *path)
+            rank = (
+                confidence_tier,
+                document_source,
+                clean_text(str(metadata.get("canonical_url") or "")),
+                claim_index,
+            )
+            occurrences.append((document_index, claim_index, key, rank))
+
+    winners: dict[tuple[str, ...], tuple[int, int, tuple[object, ...]]] = {}
+    for document_index, claim_index, key, rank in occurrences:
+        current = winners.get(key)
+        if current is None or rank < current[2]:
+            winners[key] = (document_index, claim_index, rank)
+    winner_pairs = {(value[0], value[1]) for value in winners.values()}
+    duplicate_count = len(occurrences) - len(winner_pairs)
+
+    output: list[dict[str, object]] = []
+    for document_index, item in enumerate(documents):
+        claims = item.get("claims") or []
+        new_claims: list[object] = []
+        old_to_new: dict[int, int] = {}
+        for claim_index, claim in enumerate(claims):
+            pair = (document_index, claim_index)
+            if pair in invalid or pair not in winner_pairs:
+                continue
+            old_to_new[claim_index] = len(new_claims)
+            new_claims.append(claim)
+        item["claims"] = new_claims
+        _remap_section_claim_indexes(item, old_to_new)
+        output.append(item)
+
+    report = CorpusQualityReport(
+        input_claim_count=input_claim_count,
+        emitted_claim_count=sum(len(item.get("claims") or []) for item in output),
+        invalid_claim_count=len(invalid),
+        duplicate_claim_count=duplicate_count,
+        structural_error_count=structural_error_count,
+        invalid_reasons=tuple(sorted(reason_counts.items())),
+    )
+    return output, report
+
+
+def audit_normalized_documents(documents: Sequence[Mapping[str, object]]) -> CorpusQualityReport:
+    """Audit an existing artifact without modifying it."""
+    import copy
+
+    cloned = copy.deepcopy(list(documents))
+    _, report = sanitize_and_deduplicate_documents(cloned)
+    return report
 
 
 def infer_required_role(text: str) -> str:
@@ -966,6 +1452,59 @@ def validate_results(
             raise ScrapeError(f"required document classes are missing: {missing}")
 
 
+def corpus_coverage_counts(
+    documents: Sequence[Mapping[str, object]],
+) -> tuple[dict[str, int], dict[str, int]]:
+    document_counts: dict[str, int] = {}
+    claim_counts: dict[str, int] = {}
+    for item in documents:
+        metadata = item.get("document") or {}
+        if not isinstance(metadata, Mapping):
+            continue
+        os_family = clean_text(str(metadata.get("os_family") or ""))
+        if not os_family:
+            continue
+        document_counts[os_family] = document_counts.get(os_family, 0) + 1
+        claim_counts[os_family] = claim_counts.get(os_family, 0) + len(item.get("claims") or ())
+    return document_counts, claim_counts
+
+
+def validate_corpus_coverage(
+    selected: Sequence[SourceSpec],
+    documents: Sequence[Mapping[str, object]],
+    *,
+    require_all_os: bool,
+    required_claim_os: Sequence[str] = (),
+) -> None:
+    """Validate evidence coverage separately from training-claim coverage.
+
+    ``--require-all-os`` guarantees that every selected OS has normalized
+    evidence. It must not force API/source-code evidence to manufacture unsafe
+    UI claims. Claim coverage is opt-in through repeatable ``--require-claim-os``.
+    """
+    selected_os = {source.os_family for source in selected}
+    required_claim_set = {clean_text(value) for value in required_claim_os if clean_text(value)}
+    unknown = required_claim_set - selected_os
+    if unknown:
+        raise ValueError(f"--require-claim-os selected unknown or disabled OS families: {sorted(unknown)}")
+
+    document_counts, claim_counts = corpus_coverage_counts(documents)
+    failures: list[str] = []
+    if require_all_os:
+        failures.extend(
+            f"{os_family}: no normalized documents"
+            for os_family in sorted(selected_os)
+            if document_counts.get(os_family, 0) < 1
+        )
+    failures.extend(
+        f"{os_family}: no validated setting_variant claims"
+        for os_family in sorted(required_claim_set)
+        if claim_counts.get(os_family, 0) < 1
+    )
+    if failures:
+        raise ScrapeError("validated corpus coverage failed: " + "; ".join(failures))
+
+
 def atomic_write_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -1006,7 +1545,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     validate_results(
         selected,
         results,
-        require_all_os=args.require_all_os,
+        # Coverage is rechecked after claim validation and deduplication below.
+        require_all_os=False,
         require_required_classes=not args.allow_missing_required_classes,
     )
     documents = [document for result in results for document in result.documents]
@@ -1017,13 +1557,46 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             str(item["document"]["canonical_url"]),
         )
     )
+    documents, quality_report = sanitize_and_deduplicate_documents(documents)
+    validate_corpus_coverage(
+        selected,
+        documents,
+        require_all_os=args.require_all_os,
+        required_claim_os=args.require_claim_os,
+    )
+    if args.fail_on_rejected_claim and (
+        quality_report.invalid_claim_count or quality_report.structural_error_count
+    ):
+        raise ScrapeError(
+            "claim quality gate rejected "
+            f"{quality_report.invalid_claim_count} claims and "
+            f"{quality_report.structural_error_count} structural errors: "
+            f"{dict(quality_report.invalid_reasons)}"
+        )
     output = Path(args.output)
+    final_counts_by_source: dict[str, int] = {}
+    for item in documents:
+        metadata = item.get("document") or {}
+        source_id = str(metadata.get("source_id") or "") if isinstance(metadata, Mapping) else ""
+        final_counts_by_source[source_id] = final_counts_by_source.get(source_id, 0) + len(item.get("claims") or ())
+    document_counts_by_os, claim_counts_by_os = corpus_coverage_counts(documents)
+    selected_os = sorted({source.os_family for source in selected})
     manifest = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "output": output.as_posix(),
         "document_count": len(documents),
         "setting_claim_count": sum(len(item.get("claims") or ()) for item in documents),
+        "claim_quality": quality_report.to_mapping(),
+        "claim_coverage": {
+            "documents_by_os": dict(sorted(document_counts_by_os.items())),
+            "claims_by_os": dict(sorted(claim_counts_by_os.items())),
+            "selected_os": selected_os,
+            "required_claim_os": sorted(set(args.require_claim_os)),
+            "zero_claim_os": [
+                os_family for os_family in selected_os if claim_counts_by_os.get(os_family, 0) < 1
+            ],
+        },
         "stale_sources": stale,
         "sources": [
             {
@@ -1032,7 +1605,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 "discovery_mode": result.source.discovery_mode,
                 "revision": result.revision,
                 "document_count": len(result.documents),
-                "setting_claim_count": sum(len(item.get("claims") or ()) for item in result.documents),
+                "setting_claim_count": final_counts_by_source.get(result.source.source_key, 0),
                 "required_classes": list(result.source.required_classes),
                 "observed_classes": list(result.observed_classes),
                 "snapshot_paths": list(result.snapshot_paths),
@@ -1054,8 +1627,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--snapshot-dir", default="artifacts/document-snapshots")
     parser.add_argument("--output", default="artifacts/normalized-documents.json")
     parser.add_argument("--max-evidence-tier", type=int, default=2, help="reject sources above this confidence tier")
-    parser.add_argument("--require-all-os", action="store_true", help="require documents and setting claims for every selected OS")
+    parser.add_argument(
+        "--require-all-os",
+        action="store_true",
+        help="require normalized evidence documents for every selected OS",
+    )
+    parser.add_argument(
+        "--require-claim-os",
+        action="append",
+        default=[],
+        help="require at least one validated setting claim for this OS family; repeatable",
+    )
     parser.add_argument("--fail-on-stale-source", action="store_true", help="reject revisions that differ from the prior manifest")
+    parser.add_argument("--fail-on-rejected-claim", action="store_true", help="fail if the final quality gate rejects any generated claim")
     parser.add_argument("--allow-missing-required-classes", action="store_true", help="do not fail when a source misses a registry-required document class")
     parser.add_argument("--max-pages-per-source", type=int, default=250)
     parser.add_argument("--max-depth", type=int, default=4)
