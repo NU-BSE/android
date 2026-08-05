@@ -18,7 +18,7 @@ from typing import Callable, Iterable, Iterator, Mapping, Sequence
 from urllib.parse import urlparse
 
 DEFAULT_MODEL = "qwen3.7-plus"
-DEFAULT_API_KEY_ENV = "DASHSCOPE_API_KEY"
+DEFAULT_API_KEY_ENV = os.environ.get('DASHSCOPE_API_KEY')
 DEFAULT_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 _ALLOWED_INTENTS = {"find", "open", "understand", "confirm"}
 _FORBIDDEN = (
