@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "base_model": "mPLUG/GUI-Owl-1.5-2B-Instruct",
+  "adapters": {
+    "gui_policy": {
+      "dataset_id": "lgy0404/mobileforge-exploration-trajectories",
+      "package": "com.android.settings",
+      "prepared_jsonl": "artifacts/training/gui-policy-mobileforge.jsonl",
+      "format": "gui_owl_tool_sft",
+      "lora": {
+        "rank": 16,
+        "alpha": 32,
+        "dropout": 0.0,
+        "target_modules": [
+          "q_proj",
+          "k_proj",
+          "v_proj",
+          "o_proj",
+          "gate_proj",
+          "up_proj",
+          "down_proj"
+        ]
+      }
+    },
+    "chat": {
+      "generator_model": "qwen3.7-plus",
+      "api_key_env": "DASHSCOPE_API_KEY",
+      "base_url_env": "DASHSCOPE_BASE_URL",
+      "prepared_jsonl": "artifacts/training/chat-screen-qa-qwen.jsonl",
+      "format": "chat_completion_sft",
+      "lora": {
+        "rank": 16,
+        "alpha": 32,
+        "dropout": 0.05,
+        "target_modules": [
+          "q_proj",
+          "k_proj",
+          "v_proj",
+          "o_proj",
+          "gate_proj",
+          "up_proj",
+          "down_proj"
+        ]
+      }
+    }
+  }
+}
