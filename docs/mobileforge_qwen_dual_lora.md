@@ -62,11 +62,31 @@ executable guidance, retries bounded transient failures, and never writes the
 API key to disk.
 
 The resulting chat records contain ordinary system/user/assistant completions,
-without GUI tool calls. Train them into the `chat` adapter, while the MobileForge
-records train the separate `gui_policy` adapter. This prevents natural chat from
-collapsing into the action grammar and keeps navigation policy responses concise.
+without GUI tool calls. This prevents natural chat from collapsing into the
+action grammar and keeps navigation policy responses concise.
 
-Configuration for both datasets and LoRA targets is in
-`config/gui_owl_dual_lora_data.json`. This change prepares datasets only; it does
-not commit third-party data, generated Q&A, API credentials, model weights, or
-adapter checkpoints.
+## Train the separate adapters
+
+Install the training extra, then train each named adapter from its own grammar:
+
+```bash
+python -m pip install -e '.[train]'
+
+python scripts/train_gui_owl_adapter.py \
+  --adapter gui_policy \
+  --output artifacts/adapters/gui_policy
+
+python scripts/train_gui_owl_adapter.py \
+  --adapter chat \
+  --output artifacts/adapters/chat
+```
+
+Training masks every system/user prompt and applies completion loss only to the
+final assistant turn. GUI records therefore supervise GUI-Owl tool calls, while
+chat records supervise plain natural-language answers. Each output directory
+contains only its PEFT adapter, processor metadata, and a credential-free
+training manifest.
+
+Configuration for datasets, adapter names, and LoRA targets is in
+`config/gui_owl_dual_lora_data.json`. The repository does not commit third-party
+data, generated Q&A, API credentials, model weights, or adapter checkpoints.
