@@ -148,6 +148,10 @@ The Hugging Face token warning is independent of training correctness. Set
 `HF_TOKEN` only to authenticate Hub downloads and increase download limits; it is
 not required for a public model.
 
+The macOS dependency/device update was validated by the focused GitHub Actions
+run after adding `torchvision` to the training extra and testing CUDA/MPS/CPU
+device selection.
+
 ## Stage 2: UI-MOPD mathematics
 
 The reference implementation is `android_drlqn/ui_mopd.py`. It is model-agnostic
