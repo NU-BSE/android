@@ -107,8 +107,9 @@ chat records supervise ordinary natural-language answers.
 
 `AutoProcessor` constructs Qwen3-VL's image and video processors even though this
 pipeline trains on screenshots. The Qwen3-VL video processor imports
-`torchvision`, so `torch` by itself is not sufficient. Install both packages in
-the same virtual environment, then reinstall the project training extra:
+`torchvision`, so `torch` by itself is not sufficient. Install the compatible
+PyTorch packages together in the same virtual environment, then reinstall the
+project training extra:
 
 ```bash
 python -m pip install --upgrade torch torchvision
