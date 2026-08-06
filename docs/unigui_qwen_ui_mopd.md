@@ -103,6 +103,50 @@ The trainer masks the system/user prompt and applies loss only to the final
 assistant completion. GUI records supervise action conclusions and tool calls;
 chat records supervise ordinary natural-language answers.
 
+### macOS and Apple silicon
+
+`AutoProcessor` constructs Qwen3-VL's image and video processors even though this
+pipeline trains on screenshots. The Qwen3-VL video processor imports
+`torchvision`, so `torch` by itself is not sufficient. Install both packages in
+the same virtual environment, then reinstall the project training extra:
+
+```bash
+python -m pip install --upgrade torch torchvision
+python -m pip install -e '.[train]'
+
+python - <<'PY'
+import torch, torchvision
+print("torch", torch.__version__)
+print("torchvision", torchvision.__version__)
+print("MPS available", torch.backends.mps.is_available())
+PY
+```
+
+The trainer selects devices in the order CUDA, Apple MPS, then CPU. On Apple
+silicon it therefore uses `mps` with `float16` when MPS is available. It can also
+be selected explicitly:
+
+```bash
+python scripts/train_gui_owl_adapter.py \
+  --adapter gui_policy \
+  --device mps \
+  --max-records 8
+```
+
+For an operation that PyTorch does not yet implement on MPS, CPU fallback can be
+enabled for that run:
+
+```bash
+PYTORCH_ENABLE_MPS_FALLBACK=1 python scripts/train_gui_owl_adapter.py \
+  --adapter gui_policy \
+  --device mps \
+  --max-records 8
+```
+
+The Hugging Face token warning is independent of training correctness. Set
+`HF_TOKEN` only to authenticate Hub downloads and increase download limits; it is
+not required for a public model.
+
 ## Stage 2: UI-MOPD mathematics
 
 The reference implementation is `android_drlqn/ui_mopd.py`. It is model-agnostic
