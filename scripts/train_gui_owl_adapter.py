@@ -43,6 +43,25 @@ def iter_messages(path: str | Path, *, max_records: int | None = None) -> Iterat
             break
 
 
+def _default_device(torch_module: object) -> str:
+    cuda = getattr(torch_module, "cuda", None)
+    if cuda is not None and bool(cuda.is_available()):
+        return "cuda"
+    backends = getattr(torch_module, "backends", None)
+    mps = getattr(backends, "mps", None) if backends is not None else None
+    if mps is not None and bool(mps.is_available()):
+        return "mps"
+    return "cpu"
+
+
+def _dtype_for_device(torch_module: object, device: str):
+    if device.startswith("cuda"):
+        return torch_module.bfloat16
+    if device.startswith("mps"):
+        return torch_module.float16
+    return torch_module.float32
+
+
 def _to_device(batch: Mapping[str, object], device: str) -> dict[str, object]:
     return {
         key: value.to(device) if hasattr(value, "to") else value
@@ -76,10 +95,26 @@ def _encode_completion(processor, messages: Sequence[object], device: str) -> di
 def train(args: argparse.Namespace) -> dict[str, object]:
     try:
         import torch
+    except ImportError as exc:
+        raise RuntimeError(
+            "PyTorch is missing; install the training extra: "
+            "python -m pip install -e '.[train]'"
+        ) from exc
+    try:
+        import torchvision  # noqa: F401
+    except (ImportError, RuntimeError) as exc:
+        raise RuntimeError(
+            "torchvision is missing or incompatible with torch. Reinstall the "
+            "training extra together: python -m pip install --upgrade --force-reinstall "
+            "torch torchvision && python -m pip install -e '.[train]'"
+        ) from exc
+    try:
         from peft import LoraConfig, get_peft_model
         from transformers import AutoProcessor, Qwen3VLForConditionalGeneration, set_seed
     except ImportError as exc:
-        raise RuntimeError("install the training extra: python -m pip install -e '.[train]'") from exc
+        raise RuntimeError(
+            "install the training extra: python -m pip install -e '.[train]'"
+        ) from exc
 
     base_model, adapter = load_adapter_config(args.config, args.adapter)
     data_path = Path(args.data or str(adapter.get("prepared_jsonl") or ""))
@@ -90,8 +125,8 @@ def train(args: argparse.Namespace) -> dict[str, object]:
         raise ValueError("adapter config lacks lora settings")
 
     set_seed(args.seed)
-    device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
-    dtype = torch.bfloat16 if device.startswith("cuda") else torch.float32
+    device = args.device or _default_device(torch)
+    dtype = _dtype_for_device(torch, device)
     processor = AutoProcessor.from_pretrained(base_model)
     try:
         model = Qwen3VLForConditionalGeneration.from_pretrained(
@@ -158,6 +193,8 @@ def train(args: argparse.Namespace) -> dict[str, object]:
         "adapter": args.adapter,
         "base_model": base_model,
         "data": str(data_path),
+        "device": device,
+        "dtype": str(dtype).removeprefix("torch."),
         "records": len(records),
         "epochs": args.epochs,
         "updates": updates,
