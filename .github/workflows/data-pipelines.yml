@@ -20,6 +20,7 @@ on:
       - .dockerignore
       - .env.example
       - docs/docker_ubuntu_training.md
+      - docs/unigui_qwen_ui_mopd.md
       - .github/workflows/data-pipelines.yml
   workflow_dispatch:
 
