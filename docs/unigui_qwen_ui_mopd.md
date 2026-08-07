@@ -152,6 +152,27 @@ The macOS dependency/device update was validated by the focused GitHub Actions
 run after adding `torchvision` to the training extra and testing CUDA/MPS/CPU
 device selection.
 
+### Ubuntu with Docker Compose
+
+For CUDA training on Ubuntu, use `Dockerfile.train` and `compose.yaml` instead of
+rebuilding the Python environment on the host. The Compose services cover
+Uni-GUI preparation, Qwen chat generation, a small CUDA smoke run, and both LoRA
+training jobs. Artifacts remain under the host `./artifacts` directory and model
+caches persist in Docker volumes.
+
+```bash
+cp .env.example .env
+docker compose build
+docker compose run --rm gpu-shell nvidia-smi
+docker compose run --rm prepare-unigui
+docker compose run --rm train-gui-smoke
+docker compose run --rm train-gui
+```
+
+The Ubuntu host needs an NVIDIA driver plus NVIDIA Container Toolkit; it does not
+need host-side Python, torch, or torchvision. Full setup and Qwen/chat commands
+are documented in `docs/docker_ubuntu_training.md`.
+
 ## Stage 2: UI-MOPD mathematics
 
 The reference implementation is `android_drlqn/ui_mopd.py`. It is model-agnostic
