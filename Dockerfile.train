@@ -1,0 +1,34 @@
+ARG PYTORCH_IMAGE=pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+FROM ${PYTORCH_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONUNBUFFERED=1 \
+    HF_HOME=/cache/huggingface \
+    TORCH_HOME=/cache/torch \
+    TOKENIZERS_PARALLELISM=false
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        git \
+        libgl1 \
+        libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+
+# Install Python dependencies in a cacheable layer. The PyTorch base image already
+# supplies a CUDA-matched torch/torchvision pair; the project constraints keep it
+# unless a newer compatible dependency is explicitly requested.
+COPY pyproject.toml ./
+COPY android_drlqn ./android_drlqn
+RUN python -m pip install --upgrade pip \
+    && python -m pip install --no-cache-dir '.[data,train]'
+
+COPY config ./config
+COPY scripts ./scripts
+
+RUN mkdir -p /workspace/artifacts /cache/huggingface /cache/torch
+
+CMD ["bash"]
