@@ -1,0 +1,120 @@
+x-runtime: &runtime
+  build:
+    context: .
+    dockerfile: Dockerfile.train
+  image: android-gui-owl-train:local
+  working_dir: /workspace
+  volumes:
+    - .:/workspace
+    - hf-cache:/cache/huggingface
+    - torch-cache:/cache/torch
+  environment:
+    HF_TOKEN: ${HF_TOKEN:-}
+    HUGGING_FACE_HUB_TOKEN: ${HF_TOKEN:-}
+    DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+    DASHSCOPE_BASE_URL: ${DASHSCOPE_BASE_URL:-https://dashscope-intl.aliyuncs.com/compatible-mode/v1}
+    PYTHONUNBUFFERED: "1"
+    TOKENIZERS_PARALLELISM: "false"
+
+x-gpu-runtime: &gpu-runtime
+  <<: *runtime
+  ipc: host
+  shm_size: "16gb"
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
+
+services:
+  shell:
+    <<: *runtime
+    command: ["bash"]
+    stdin_open: true
+    tty: true
+
+  gpu-shell:
+    <<: *gpu-runtime
+    command: ["bash"]
+    stdin_open: true
+    tty: true
+
+  prepare-unigui:
+    <<: *runtime
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+      HUGGING_FACE_HUB_TOKEN: ${HF_TOKEN:-}
+      UNIGUI_REVISION: ${UNIGUI_REVISION:-}
+      UNIGUI_APP: ${UNIGUI_APP:-settings}
+    command:
+      - bash
+      - -lc
+      - |
+        set -euo pipefail
+        args=(
+          --app "$${UNIGUI_APP}"
+          --output artifacts/training/gui-policy-unigui-openmobile.jsonl
+        )
+        if [[ -n "$${UNIGUI_REVISION}" ]]; then
+          args+=(--revision "$${UNIGUI_REVISION}")
+        fi
+        python scripts/prepare_unigui_gui_policy.py "$${args[@]}"
+
+  generate-chat:
+    <<: *runtime
+    command:
+      - python
+      - scripts/generate_qwen_screen_chat.py
+      - --input
+      - artifacts/training/gui-policy-unigui-openmobile.jsonl
+      - --output
+      - artifacts/training/chat-screen-qa-qwen.jsonl
+      - --model
+      - qwen3.7-plus
+      - --questions-per-screen
+      - "4"
+      - --resume
+
+  train-gui:
+    <<: *gpu-runtime
+    command:
+      - python
+      - scripts/train_gui_owl_adapter.py
+      - --adapter
+      - gui_policy
+      - --device
+      - cuda
+      - --output
+      - artifacts/adapters/gui_policy
+
+  train-gui-smoke:
+    <<: *gpu-runtime
+    command:
+      - python
+      - scripts/train_gui_owl_adapter.py
+      - --adapter
+      - gui_policy
+      - --device
+      - cuda
+      - --max-records
+      - "${SMOKE_RECORDS:-8}"
+      - --output
+      - artifacts/adapters/gui_policy-smoke
+
+  train-chat:
+    <<: *gpu-runtime
+    command:
+      - python
+      - scripts/train_gui_owl_adapter.py
+      - --adapter
+      - chat
+      - --device
+      - cuda
+      - --output
+      - artifacts/adapters/chat
+
+volumes:
+  hf-cache:
+  torch-cache:
