@@ -15,6 +15,11 @@ on:
       - tests/test_gui_owl_adapter_data.py
       - config/gui_owl_dual_lora_data.json
       - pyproject.toml
+      - Dockerfile.train
+      - compose.yaml
+      - .dockerignore
+      - .env.example
+      - docs/docker_ubuntu_training.md
       - .github/workflows/data-pipelines.yml
   workflow_dispatch:
 
@@ -41,6 +46,8 @@ jobs:
             scripts/prepare_unigui_gui_policy.py \
             scripts/generate_qwen_screen_chat.py \
             scripts/train_gui_owl_adapter.py
+      - name: Validate Docker Compose
+        run: docker compose config -q
       - name: Run focused tests
         run: |
           python -m pytest -q \
