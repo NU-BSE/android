@@ -18,13 +18,27 @@ RUN apt-get update \
 
 WORKDIR /workspace
 
-# Install Python dependencies in a cacheable layer. The PyTorch base image already
-# supplies a CUDA-matched torch/torchvision pair; the project constraints keep it
-# unless a newer compatible dependency is explicitly requested.
+# Keep the CUDA runtime and torch version from the official PyTorch image intact.
+# Torch 2.5.1 pairs with torchvision 0.20.1; install that pair explicitly instead
+# of allowing an unconstrained pip resolution to replace the CUDA-enabled torch.
 COPY pyproject.toml ./
 COPY android_drlqn ./android_drlqn
 RUN python -m pip install --upgrade pip \
-    && python -m pip install --no-cache-dir '.[data,train]'
+    && python -m pip install --no-cache-dir --no-deps 'torchvision==0.20.1' \
+    && python -m pip install --no-cache-dir \
+        'huggingface-hub>=0.34' \
+        'transformers>=4.57.1' \
+        'peft>=0.13' \
+        'safetensors>=0.4' \
+        'pillow>=10.0' \
+    && python -m pip install --no-cache-dir --no-deps . \
+    && python - <<'PY'
+import torch
+import torchvision
+print('torch', torch.__version__)
+print('torchvision', torchvision.__version__)
+print('cuda runtime', torch.version.cuda)
+PY
 
 COPY config ./config
 COPY scripts ./scripts
