@@ -235,7 +235,8 @@ def spec_from_plan(plan: Mapping[str, object], name: str) -> StudentSpec:
     if not isinstance(raw, Mapping):
         return DEFAULT_STUDENT_SPECS[name]
     defaults = asdict(DEFAULT_STUDENT_SPECS[name])
-    merged = {**defaults, **dict(raw), "name": name}
+    overrides = {key: value for key, value in raw.items() if key in defaults}
+    merged = {**defaults, **overrides, "name": name}
     merged["deepstack_visual_indexes"] = tuple(
         int(value) for value in merged["deepstack_visual_indexes"]
     )
