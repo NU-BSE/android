@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "initialization_teacher": "mPLUG/GUI-Owl-1.5-2B-Instruct",
+  "teacher_adapters": {
+    "gui_policy": "artifacts/adapters/gui_policy",
+    "chat": "artifacts/adapters/chat"
+  },
+  "corpora": {
+    "gui_policy": {
+      "path": "artifacts/training/gui-policy-unigui-openmobile.jsonl",
+      "weight": 1.25
+    },
+    "chat": {
+      "path": "artifacts/training/chat-screen-qa-qwen.jsonl",
+      "weight": 1.0
+    }
+  },
+  "objective": {
+    "temperature": 2.0,
+    "supervised_weight": 0.5,
+    "logit_kl_weight": 1.0,
+    "hidden_state_weight": 0.1,
+    "learning_rate": 1e-5,
+    "epochs": 1,
+    "gradient_accumulation": 8,
+    "grad_clip": 1.0
+  },
+  "students": {
+    "1.5b": {
+      "target_parameters": 1500000000,
+      "text_layers": 16,
+      "text_hidden_size": 2048,
+      "text_intermediate_size": 6144,
+      "text_attention_heads": 16,
+      "text_key_value_heads": 8,
+      "vision_depth": 24,
+      "vision_hidden_size": 1024,
+      "vision_intermediate_size": 4096,
+      "vision_heads": 16,
+      "deepstack_visual_indexes": [5, 11, 17],
+      "freeze_vision_during_kd": true,
+      "max_relative_parameter_error": 0.15,
+      "initialized": "artifacts/students/gui-owl-1.5b-init",
+      "distilled": "artifacts/students/gui-owl-1.5b-distilled"
+    },
+    "1b": {
+      "target_parameters": 1000000000,
+      "text_layers": 6,
+      "text_hidden_size": 2048,
+      "text_intermediate_size": 6144,
+      "text_attention_heads": 16,
+      "text_key_value_heads": 8,
+      "vision_depth": 24,
+      "vision_hidden_size": 1024,
+      "vision_intermediate_size": 4096,
+      "vision_heads": 16,
+      "deepstack_visual_indexes": [5, 11, 17],
+      "freeze_vision_during_kd": true,
+      "max_relative_parameter_error": 0.15,
+      "initialized": "artifacts/students/gui-owl-1b-init",
+      "distilled": "artifacts/students/gui-owl-1b-distilled"
+    },
+    "0.5b": {
+      "target_parameters": 500000000,
+      "text_layers": 16,
+      "text_hidden_size": 1024,
+      "text_intermediate_size": 3072,
+      "text_attention_heads": 8,
+      "text_key_value_heads": 4,
+      "vision_depth": 12,
+      "vision_hidden_size": 768,
+      "vision_intermediate_size": 3072,
+      "vision_heads": 12,
+      "deepstack_visual_indexes": [3, 7, 11],
+      "freeze_vision_during_kd": false,
+      "max_relative_parameter_error": 0.20,
+      "initialized": "artifacts/students/gui-owl-0.5b-init",
+      "distilled": "artifacts/students/gui-owl-0.5b-distilled",
+      "recommended_logit_teacher": "artifacts/students/gui-owl-1b-distilled"
+    }
+  }
+}
