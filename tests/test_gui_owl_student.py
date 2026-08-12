@@ -8,6 +8,7 @@ from android_drlqn.gui_owl_student import (
     evenly_spaced_layer_map,
     prefix_copy_shape,
     relative_parameter_error,
+    resolve_peft_adapter_dir,
     teacher_key_for_student,
 )
 
@@ -96,3 +97,23 @@ def test_parameter_error_and_invalid_teacher_config():
     assert relative_parameter_error(1_050_000_000, 1_000_000_000) == pytest.approx(0.05)
     with pytest.raises(ValueError, match="qwen3_vl"):
         build_student_config_dict({"model_type": "other"}, DEFAULT_STUDENT_SPECS["1b"])
+
+
+def test_resolve_peft_adapter_dir_supports_named_and_flat_layouts(tmp_path):
+    named_root = tmp_path / "gui"
+    named = named_root / "gui_policy"
+    named.mkdir(parents=True)
+    (named / "adapter_config.json").write_text("{}", encoding="utf-8")
+    assert resolve_peft_adapter_dir(named_root, "gui_policy") == named
+
+    flat = tmp_path / "chat"
+    flat.mkdir()
+    (flat / "adapter_config.json").write_text("{}", encoding="utf-8")
+    assert resolve_peft_adapter_dir(flat, "chat") == flat
+
+
+def test_resolve_peft_adapter_dir_requires_adapter_config(tmp_path):
+    root = tmp_path / "missing"
+    root.mkdir()
+    with pytest.raises(FileNotFoundError, match="adapter_config.json"):
+        resolve_peft_adapter_dir(root, "gui_policy")
