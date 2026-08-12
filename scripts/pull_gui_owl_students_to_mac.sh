@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Run this script on the Mac after the Vast.ai host packages the student
-# bundles. It downloads each requested size, verifies SHA-256, then extracts it.
+# Run on macOS after the GPU host packages accepted v2 student bundles.
 
 host="${VAST_HOST:-}"
 port="${VAST_PORT:-}"
 user="${VAST_USER:-root}"
 remote_root="${VAST_REMOTE_REPO:-/root/android}"
-dest="${GUI_OWL_MAC_DEST:-$HOME/Models/gui-owl}"
+remote_transfer_rel="${REMOTE_TRANSFER_DIR:-artifacts/transfer/v2}"
+dest="${GUI_OWL_MAC_DEST:-$HOME/Models/gui-owl-v2}"
 student_selector="all"
 
 usage() {
@@ -22,15 +22,16 @@ Options:
   --port PORT          Vast external SSH port (or set VAST_PORT)
   --user USER          SSH user (default: root)
   --remote-root PATH   repo path on Vast (default: /root/android)
-  --dest PATH          local destination (default: ~/Models/gui-owl)
+  --dest PATH          local destination (default: ~/Models/gui-owl-v2)
   --student SIZE       0.5b, 1b, 1.5b, or all (default: all)
   -h, --help           show this help
 
 The remote host must first run:
   bash scripts/package_gui_owl_students.sh all
 
-The script uses rsync with --partial when rsync exists on both hosts; otherwise
-it falls back to scp. It does not delete remote files or stop the Vast instance.
+By default bundles are read from artifacts/transfer/v2. The script uses rsync
+with --partial when available on both hosts, otherwise scp. It never deletes
+remote files or stops the GPU instance.
 EOF
 }
 
@@ -96,8 +97,8 @@ fetch_file() {
 
 for size in "${sizes[@]}"; do
   base="gui-owl-${size}-mac-bundle.tar"
-  remote_dir="$remote_root/artifacts/transfer"
-  echo "==> [$size] Downloading bundle"
+  remote_dir="$remote_root/$remote_transfer_rel"
+  echo "==> [$size] Downloading v2 bundle"
   fetch_file "$remote_dir/$base" "$dest/downloads"
   fetch_file "$remote_dir/$base.sha256" "$dest/downloads"
 
@@ -112,6 +113,5 @@ for size in "${sizes[@]}"; do
   tar -xf "$dest/downloads/$base" -C "$dest/extracted/$size"
 done
 
-echo
-printf 'All requested bundles verified and extracted under:\n  %s\n' "$dest/extracted"
-printf 'Keep the .tar files until you have tested the local GGUF/mmproj pairs.\n'
+printf '\nAll requested v2 bundles verified and extracted under:\n  %s\n' "$dest/extracted"
+printf 'Keep the .tar files until local GGUF/mmproj inference testing passes.\n'
