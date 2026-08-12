@@ -10,8 +10,10 @@ on:
       - scripts/prepare_unigui_gui_policy.py
       - scripts/generate_qwen_screen_chat.py
       - scripts/train_gui_owl_adapter.py
+      - scripts/calibrate_gui_owl_compression.py
       - scripts/build_gui_owl_student.py
       - scripts/distill_gui_owl_student.py
+      - scripts/run_gui_owl_progressive_distillation.py
       - scripts/export_gui_owl_gguf.sh
       - scripts/package_gui_owl_students.sh
       - scripts/pull_gui_owl_students_to_mac.sh
@@ -20,6 +22,7 @@ on:
       - tests/test_qwen_screen_qa.py
       - tests/test_gui_owl_adapter_data.py
       - tests/test_gui_owl_student.py
+      - tests/test_gui_owl_progressive_pipeline.py
       - tests/test_gguf_export_scripts.py
       - config/gui_owl_dual_lora_data.json
       - config/gui_owl_students.json
@@ -59,8 +62,10 @@ jobs:
             scripts/prepare_unigui_gui_policy.py \
             scripts/generate_qwen_screen_chat.py \
             scripts/train_gui_owl_adapter.py \
+            scripts/calibrate_gui_owl_compression.py \
             scripts/build_gui_owl_student.py \
-            scripts/distill_gui_owl_student.py
+            scripts/distill_gui_owl_student.py \
+            scripts/run_gui_owl_progressive_distillation.py
       - name: Validate shell scripts
         run: |
           bash -n scripts/export_gui_owl_gguf.sh
@@ -76,4 +81,5 @@ jobs:
             tests/test_qwen_screen_qa.py \
             tests/test_gui_owl_adapter_data.py \
             tests/test_gui_owl_student.py \
+            tests/test_gui_owl_progressive_pipeline.py \
             tests/test_gguf_export_scripts.py
