@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from android_drlqn.gui_owl_student import load_student_plan
+from scripts.normalize_gui_owl_calibration import grouped_query_kv_selection
 from scripts.run_gui_owl_progressive_distillation import _accepted
 
 
@@ -46,6 +47,23 @@ def test_progressive_sources_avoid_one_shot_depth_and_bad_half_b_cascade():
     assert progressive["0.5b"]["source"].endswith("gui-owl-1.5b-distilled")
     assert progressive["0.5b"]["text_depth_schedule"] == []
     assert progressive["0.5b"]["structured_width_pruning"] is True
+
+
+def test_grouped_query_pruning_keeps_query_heads_with_their_kv_head():
+    # Source GQA ratio is 16 query / 8 KV = two query heads per KV head.
+    # Give KV groups 1, 3, 5, 7 the strongest scores and make individual
+    # query-head scores tempt an independent top-k selector elsewhere.
+    q_scores = [100.0, 0.0, 1.0, 1.0, 90.0, 0.0, 1.0, 1.0,
+                80.0, 0.0, 1.0, 1.0, 70.0, 0.0, 1.0, 1.0]
+    kv_scores = [0.0, 1000.0, 0.0, 900.0, 0.0, 800.0, 0.0, 700.0]
+    q_heads, kv_heads = grouped_query_kv_selection(
+        q_scores,
+        kv_scores,
+        target_q_heads=8,
+        target_kv_heads=4,
+    )
+    assert kv_heads == (1, 3, 5, 7)
+    assert q_heads == (2, 3, 6, 7, 10, 11, 14, 15)
 
 
 def test_new_outputs_are_versioned_away_from_collapsed_checkpoints():
