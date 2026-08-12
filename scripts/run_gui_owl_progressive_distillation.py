@@ -15,7 +15,15 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 from android_drlqn.gui_owl_student import load_student_plan
-from scripts.normalize_gui_owl_calibration import normalize_manifest
+
+# Support both documented direct execution (`python scripts/...py`) and package
+# imports used by tests (`from scripts.run_... import ...`). When a file inside
+# scripts/ is executed directly, Python puts scripts/ rather than the repo root
+# at sys.path[0], so an absolute `scripts.normalize_...` import cannot resolve.
+if __package__:
+    from .normalize_gui_owl_calibration import normalize_manifest
+else:
+    from normalize_gui_owl_calibration import normalize_manifest
 
 
 def _student_entry(plan: Mapping[str, object], name: str) -> dict[str, object]:
