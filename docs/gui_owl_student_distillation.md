@@ -194,7 +194,78 @@ parsing on its held-out GUI sample. A failed gate retains the final debug model
 and the strongest periodic checkpoint as a sibling `*-best` directory, then
 exits non-zero so the cascade stops.
 
-## Recommended run order
+## Full GPU training wrappers: Hugging Face weights only
+
+For a rented GPU host, use the model-specific wrappers below. They perform all
+required preflight checks, reuse or prepare the recovery corpus, reuse or run
+calibration, execute the full progressive KD path, verify the final generation
+gate, and package **only the accepted Hugging Face checkpoint**. They never call
+llama.cpp and never create GGUF files.
+
+Run 1.5B first:
+
+```bash
+bash scripts/train_gui_owl_1_5b_full.sh
+```
+
+Then 1B and 0.5B, both of which require the accepted 1.5B checkpoint:
+
+```bash
+bash scripts/train_gui_owl_1b_full.sh
+bash scripts/train_gui_owl_0_5b_full.sh
+```
+
+Each wrapper defaults to `RESUME=1`, so accepted progressive checkpoints are
+reused after an interruption. Useful overrides are:
+
+```bash
+DEVICE=cuda \
+RESUME=1 \
+PACKAGE_WEIGHTS=1 \
+RECOVERY_MAX_RECORDS=50000 \
+CALIBRATION_RECORDS=64 \
+DISTILL_INTERMEDIATE_UPDATES=750 \
+  bash scripts/train_gui_owl_1_5b_full.sh
+```
+
+`DISTILL_MAX_RECORDS` and `DISTILL_MAX_UPDATES` may be set for bounded debugging,
+but leaving them empty selects the configured full update budgets.
+
+Accepted final checkpoints are:
+
+```text
+artifacts/students/v2/gui-owl-1.5b-distilled/
+artifacts/students/v2/gui-owl-1b-distilled/
+artifacts/students/v2/gui-owl-0.5b-distilled/
+```
+
+With `PACKAGE_WEIGHTS=1`, an uncompressed transfer tar is created under:
+
+```text
+artifacts/transfer/v2-hf/
+```
+
+For example:
+
+```text
+artifacts/transfer/v2-hf/gui-owl-1.5b-hf-v2.tar
+artifacts/transfer/v2-hf/gui-owl-1.5b-hf-v2.tar.sha256
+artifacts/transfer/v2-hf/gui-owl-1.5b-hf-v2-files.sha256
+```
+
+The helper can also package an already-accepted checkpoint without retraining:
+
+```bash
+bash scripts/package_gui_owl_hf_weights.sh 1.5b
+bash scripts/package_gui_owl_hf_weights.sh 1b
+bash scripts/package_gui_owl_hf_weights.sh 0.5b
+```
+
+The tar is intentionally uncompressed: safetensors are already dense binary
+weights, so gzip usually spends rental-host CPU time for little transfer-size
+benefit. The tar checksum and per-file checksums are written before transfer.
+
+## Recommended run order without wrappers
 
 ```bash
 # CPU/network: prepare broad recovery data
@@ -243,8 +314,9 @@ STUDENT_SIZE=0.5b docker compose run --rm progressive-student
 ```
 
 The Compose GPU reservation requests one GPU, not every GPU on the host. On
-Vast.ai, where the provider already starts the workload inside a container, run
-the Python commands directly instead of Docker-in-Docker.
+Vast.ai, where the provider already starts the workload inside the provider
+container, run the Python or full-wrapper scripts directly instead of
+Docker-in-Docker.
 
 ## Outputs and GGUF boundary
 
@@ -262,15 +334,16 @@ Do not run GGUF conversion unless the final directory contains:
 {"accepted": true}
 ```
 
-`scripts/export_gui_owl_gguf.sh` enforces that gate by default and resolves the
-student path from `config/gui_owl_students.json`. V2 GGUF and transfer outputs
-live under `artifacts/gguf/v2` and `artifacts/transfer/v2`.
+The full training wrappers stop before this conversion boundary. The existing
+`scripts/export_gui_owl_gguf.sh` remains an explicit later/off-GPU step for an
+accepted checkpoint.
 
 ## Validation boundary
 
 CI checks Python syntax, dependency-light pruning/GQA/generation-gate contracts,
-shell syntax and `docker compose config -q`. It does not download the 2B model,
-download the recovery dataset, execute calibration hooks on live weights, run
-CUDA KD, validate every 0.5B tensor mapping against a live model, or perform
-llama.cpp conversion. Run a bounded GPU calibration/build before committing to
-a full paid compression job.
+all full-wrapper/package shell syntax, other shell syntax, and
+`docker compose config -q`. It does not download the 2B model, download the
+recovery dataset, execute calibration hooks on live weights, run CUDA KD,
+validate every 0.5B tensor mapping against a live model, or perform llama.cpp
+conversion. Run a bounded GPU calibration/build before committing to a full
+paid compression job.
