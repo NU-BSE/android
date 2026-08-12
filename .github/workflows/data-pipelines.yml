@@ -16,6 +16,10 @@ on:
       - scripts/build_gui_owl_student.py
       - scripts/distill_gui_owl_student.py
       - scripts/run_gui_owl_progressive_distillation.py
+      - scripts/train_gui_owl_1_5b_full.sh
+      - scripts/train_gui_owl_1b_full.sh
+      - scripts/train_gui_owl_0_5b_full.sh
+      - scripts/package_gui_owl_hf_weights.sh
       - scripts/export_gui_owl_gguf.sh
       - scripts/package_gui_owl_students.sh
       - scripts/pull_gui_owl_students_to_mac.sh
@@ -72,6 +76,10 @@ jobs:
             scripts/run_gui_owl_progressive_distillation.py
       - name: Validate shell scripts
         run: |
+          bash -n scripts/train_gui_owl_1_5b_full.sh
+          bash -n scripts/train_gui_owl_1b_full.sh
+          bash -n scripts/train_gui_owl_0_5b_full.sh
+          bash -n scripts/package_gui_owl_hf_weights.sh
           bash -n scripts/export_gui_owl_gguf.sh
           bash -n scripts/package_gui_owl_students.sh
           bash -n scripts/pull_gui_owl_students_to_mac.sh
