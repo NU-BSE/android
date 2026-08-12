@@ -1,25 +1,23 @@
 #!/usr/bin/env python3
 """Recover and distill a structurally compressed GUI-Owl student.
 
-The previous one-epoch teacher-forced pipeline could reach a plausible CE while
-free-running generation collapsed to EOS.  This trainer therefore separates:
+The v1 one-epoch, teacher-forced recipe could reach a plausible completion CE
+while free-running generation collapsed to EOS.  This trainer therefore uses
+three explicit stages:
 
-* ``recovery``: frozen embedding/LM-head stabilization with CE + forward KL +
-  hidden-state alignment on a broad recovery corpus;
-* ``on_policy``: student-sampled autoregressive K3 reverse-KL against the
-  teacher, with a small teacher-forced anchor; and
-* ``specialize``: low-LR GUI/chat specialization after generation is stable.
+* recovery: frozen embedding/LM-head CE + forward KL + hidden-state alignment;
+* on_policy: student-sampled autoregressive K3 reverse KL plus a small anchor;
+* specialize: low-LR GUI/chat specialization after generative recovery.
 
-Every stage evaluates free-running generation, records token/update counts, and
-refuses to mark a checkpoint accepted when the configured generation gate
-fails.  Optimizer duration is update-based rather than a single ``epochs=1``.
+Every stage evaluates greedy generation, records token/update counts, preserves
+the strongest periodic checkpoint as a sibling directory, and refuses to mark
+the final checkpoint accepted when the configured generation gate fails.
 """
 from __future__ import annotations
 
 import argparse
 import contextlib
 import json
-import math
 import random
 import shutil
 import statistics
@@ -52,7 +50,11 @@ class CorpusSource:
     weight: float
 
 
-def _load_jsonl_messages(path: Path, default_mode: str, limit: int | None) -> list[tuple[str, list[object]]]:
+def _load_jsonl_messages(
+    path: Path,
+    default_mode: str,
+    limit: int | None,
+) -> list[tuple[str, list[object]]]:
     output: list[tuple[str, list[object]]] = []
     for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         if not line.strip():
@@ -65,7 +67,11 @@ def _load_jsonl_messages(path: Path, default_mode: str, limit: int | None) -> li
             raise ValueError(f"{path}:{line_number}: assistant completion is missing")
         if str(messages[-1].get("role") or "") != "assistant":
             raise ValueError(f"{path}:{line_number}: final message must be assistant")
-        mode = str(value.get("teacher_mode") or default_mode) if isinstance(value, Mapping) else default_mode
+        mode = (
+            str(value.get("teacher_mode") or default_mode)
+            if isinstance(value, Mapping)
+            else default_mode
+        )
         if mode not in {"base", "gui_policy", "chat"}:
             raise ValueError(f"{path}:{line_number}: unsupported teacher_mode {mode!r}")
         output.append((mode, list(messages)))
@@ -101,7 +107,7 @@ def _recovery_sources(plan: Mapping[str, object]) -> list[CorpusSource]:
     raw = plan.get("recovery_corpora")
     if not isinstance(raw, Mapping) or not raw:
         raise ValueError(
-            "recovery stage requires recovery_corpora; do not reuse only the small specialized GUI/chat set"
+            "recovery stage requires recovery_corpora; the small GUI/chat specialization set is not enough"
         )
     result: list[CorpusSource] = []
     for name, value in raw.items():
@@ -112,8 +118,8 @@ def _recovery_sources(plan: Mapping[str, object]) -> list[CorpusSource]:
         if not path.is_file():
             if required:
                 raise FileNotFoundError(
-                    f"required broad recovery corpus is missing: {path}. "
-                    "Prepare a diverse instruction/multimodal teacher corpus before paid recovery training."
+                    f"required broad recovery corpus is missing: {path}; "
+                    "prepare diverse instruction/multimodal teacher data before paid recovery training"
                 )
             continue
         mode = str(value.get("teacher_mode") or "base")
@@ -128,7 +134,9 @@ def _recovery_sources(plan: Mapping[str, object]) -> list[CorpusSource]:
     return result
 
 
-def _stage_sources(plan: Mapping[str, object], stage: str, stage_config: Mapping[str, object]) -> list[CorpusSource]:
+def _stage_sources(
+    plan: Mapping[str, object], stage: str, stage_config: Mapping[str, object]
+) -> list[CorpusSource]:
     specialized = _specialized_sources(plan)
     if stage == "specialize":
         return specialized
@@ -138,7 +146,9 @@ def _stage_sources(plan: Mapping[str, object], stage: str, stage_config: Mapping
     return recovery
 
 
-def _corpus_records(sources: Sequence[CorpusSource], max_records: int | None) -> list[TrainingRecord]:
+def _corpus_records(
+    sources: Sequence[CorpusSource], max_records: int | None
+) -> list[TrainingRecord]:
     loaded: list[tuple[CorpusSource, list[tuple[str, list[object]]]]] = []
     for source in sources:
         loaded.append((source, _load_jsonl_messages(source.path, source.mode, max_records)))
@@ -176,7 +186,7 @@ def _split_records(
         holdout.extend(values[:count])
         train.extend(values[count:])
     if not train or not holdout:
-        raise ValueError("distillation needs enough records to create both train and holdout splits")
+        raise ValueError("distillation needs enough records for both train and holdout splits")
     rng.shuffle(train)
     rng.shuffle(holdout)
     return train, holdout
@@ -189,7 +199,9 @@ def _to_device(batch: Mapping[str, object], device: str) -> dict[str, object]:
     }
 
 
-def _encode_full(processor, messages: Sequence[object], device: str) -> tuple[dict[str, object], int, int]:
+def _encode_full(
+    processor, messages: Sequence[object], device: str
+) -> tuple[dict[str, object], int, int]:
     prompt = processor.apply_chat_template(
         list(messages[:-1]),
         tokenize=True,
@@ -206,7 +218,9 @@ def _encode_full(processor, messages: Sequence[object], device: str) -> tuple[di
     )
     prompt = _to_device(prompt, device)
     full = _to_device(full, device)
-    prompt_length = min(int(prompt["input_ids"].shape[1]), int(full["input_ids"].shape[1]))
+    prompt_length = min(
+        int(prompt["input_ids"].shape[1]), int(full["input_ids"].shape[1])
+    )
     completion_length = int(full["input_ids"].shape[1]) - prompt_length
     if completion_length < 1:
         raise ValueError("assistant completion produced no training tokens")
@@ -227,7 +241,9 @@ def _encode_prompt(processor, messages: Sequence[object], device: str) -> dict[s
     return prompt
 
 
-def _append_generated(prompt_inputs: Mapping[str, object], response_ids, torch_module) -> dict[str, object]:
+def _append_generated(
+    prompt_inputs: Mapping[str, object], response_ids, torch_module
+) -> dict[str, object]:
     prompt_ids = prompt_inputs["input_ids"]
     prompt_length = int(prompt_ids.shape[1])
     result: dict[str, object] = {}
@@ -267,10 +283,11 @@ def _torch_dtype(torch_module, device: str):
 def _load_build_manifest(student_dir: Path) -> dict[str, object]:
     for name in ("student-build-manifest.json", "compression-lineage.json"):
         path = student_dir / name
-        if path.is_file():
-            value = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(value, Mapping):
-                return dict(value)
+        if not path.is_file():
+            continue
+        value = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(value, Mapping):
+            return dict(value)
     raise FileNotFoundError(f"student compression lineage not found under: {student_dir}")
 
 
@@ -288,7 +305,11 @@ def _teacher_lineage(teacher_model: str, teacher_depth: int) -> tuple[int, ...]:
     return tuple(range(teacher_depth))
 
 
-def _teacher_hidden_positions(teacher_model: str, teacher_depth: int, student_original_ids: Sequence[int]) -> tuple[int, ...]:
+def _teacher_hidden_positions(
+    teacher_model: str,
+    teacher_depth: int,
+    student_original_ids: Sequence[int],
+) -> tuple[int, ...]:
     lineage = _teacher_lineage(teacher_model, teacher_depth)
     positions = {original: index for index, original in enumerate(lineage)}
     missing = [int(value) for value in student_original_ids if int(value) not in positions]
@@ -415,7 +436,7 @@ def _teacher_forced_terms(
     if student_logits.shape[1] != targets.shape[1]:
         raise RuntimeError("completion logit window does not align with target tokens")
     if teacher_logits.shape != student_logits.shape:
-        raise RuntimeError("teacher and student logits must share vocabulary and completion shape")
+        raise RuntimeError("teacher and student logits must share vocabulary/completion shape")
 
     supervised = functional.cross_entropy(
         student_logits.reshape(-1, student_logits.shape[-1]),
@@ -432,15 +453,15 @@ def _teacher_forced_terms(
             raise RuntimeError("hidden-state distillation requested but hidden states are missing")
         if len(teacher_hidden_positions) != len(student_output.hidden_states) - 1:
             raise RuntimeError("student lineage does not match hidden-state depth")
-        hidden_terms = []
+        terms = []
         for student_index, expected in enumerate(teacher_hidden):
             actual = student_output.hidden_states[student_index + 1][:, prompt_length:, :]
             if hidden_projector is not None:
                 actual = hidden_projector(actual.to(dtype=hidden_projector.weight.dtype))
             if actual.shape != expected.shape:
                 raise RuntimeError("hidden-state projector did not align teacher/student widths")
-            hidden_terms.append(functional.mse_loss(actual.float(), expected.float()))
-        hidden = torch_module.stack(hidden_terms).mean()
+            terms.append(functional.mse_loss(actual.float(), expected.float()))
+        hidden = torch_module.stack(terms).mean()
     return supervised, forward_kl, hidden
 
 
@@ -501,7 +522,13 @@ def _sampled_k3_loss(
     return k3.mean(), int(response_ids.numel())
 
 
-def _freeze_for_stage(student, *, freeze_embeddings: bool, freeze_lm_head: bool, freeze_vision: bool) -> None:
+def _freeze_for_stage(
+    student,
+    *,
+    freeze_embeddings: bool,
+    freeze_lm_head: bool,
+    freeze_vision: bool,
+) -> None:
     for parameter in student.parameters():
         parameter.requires_grad_(True)
     if freeze_embeddings:
@@ -515,24 +542,33 @@ def _freeze_for_stage(student, *, freeze_embeddings: bool, freeze_lm_head: bool,
             parameter.requires_grad_(False)
 
 
-def _make_hidden_projector(torch_module, student_hidden: int, teacher_hidden: int, build_manifest: Mapping[str, object], device: str, dtype):
+def _make_hidden_projector(
+    torch_module,
+    student_hidden: int,
+    teacher_hidden: int,
+    build_manifest: Mapping[str, object],
+    device: str,
+    dtype,
+):
     if student_hidden == teacher_hidden:
         return None
-    projector = torch_module.nn.Linear(student_hidden, teacher_hidden, bias=False, device=device, dtype=dtype)
+    projector = torch_module.nn.Linear(
+        student_hidden, teacher_hidden, bias=False, device=device, dtype=dtype
+    )
+    indices: object = None
+    calibration_path = Path(str(build_manifest.get("calibration_manifest") or ""))
+    if calibration_path.is_file():
+        calibration = json.loads(calibration_path.read_text(encoding="utf-8"))
+        recommended = calibration.get("recommended") if isinstance(calibration, Mapping) else None
+        if isinstance(recommended, Mapping):
+            indices = recommended.get(f"text_hidden_indices_{student_hidden}")
     with torch_module.no_grad():
         projector.weight.zero_()
-        indices = build_manifest.get("text_hidden_indices")
-        if not isinstance(indices, Sequence) or isinstance(indices, (str, bytes)):
-            # Current build manifests put structured selectors in the calibration
-            # manifest.  Recover them there when possible; otherwise use a stable
-            # low-gain random projection rather than pretending dimensions align.
-            calibration_path = Path(str(build_manifest.get("calibration_manifest") or ""))
-            if calibration_path.is_file():
-                calibration = json.loads(calibration_path.read_text(encoding="utf-8"))
-                recommended = calibration.get("recommended") if isinstance(calibration, Mapping) else None
-                if isinstance(recommended, Mapping):
-                    indices = recommended.get(f"text_hidden_indices_{student_hidden}")
-        if isinstance(indices, Sequence) and not isinstance(indices, (str, bytes)) and len(indices) == student_hidden:
+        if (
+            isinstance(indices, Sequence)
+            and not isinstance(indices, (str, bytes))
+            and len(indices) == student_hidden
+        ):
             for student_index, teacher_index in enumerate(indices):
                 teacher_index = int(teacher_index)
                 if 0 <= teacher_index < teacher_hidden:
@@ -543,13 +579,13 @@ def _make_hidden_projector(torch_module, student_hidden: int, teacher_hidden: in
     return projector
 
 
-def _trim_generated_tokens(ids: Sequence[int], *, eos_ids: set[int], pad_id: int | None) -> list[int]:
+def _trim_generated_tokens(
+    ids: Sequence[int], *, eos_ids: set[int], pad_id: int | None
+) -> list[int]:
     result: list[int] = []
     for value in ids:
         token = int(value)
-        if token in eos_ids:
-            break
-        if pad_id is not None and token == pad_id:
+        if token in eos_ids or (pad_id is not None and token == pad_id):
             break
         result.append(token)
     return result
@@ -587,7 +623,9 @@ def _evaluate_generation(
     with torch_module.no_grad():
         for record in selected:
             with _teacher_mode(teacher, record.mode, teacher_unified):
-                full, prompt_length, completion_length = _encode_full(processor, record.messages, device)
+                full, prompt_length, completion_length = _encode_full(
+                    processor, record.messages, device
+                )
                 supervised, forward_kl, _ = _teacher_forced_terms(
                     torch_module=torch_module,
                     functional=functional,
@@ -615,7 +653,9 @@ def _evaluate_generation(
                 generated = [int(value) for value in sequence[0, prompt_tokens:].tolist()]
                 if generated and generated[0] in eos_ids:
                     first_eos += 1
-                trimmed = _trim_generated_tokens(generated, eos_ids=eos_ids, pad_id=pad_id)
+                trimmed = _trim_generated_tokens(
+                    generated, eos_ids=eos_ids, pad_id=pad_id
+                )
                 lengths.append(len(trimmed))
                 text = processor.tokenizer.decode(
                     trimmed,
@@ -655,17 +695,27 @@ def _replace_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
-def _save_model(student, processor, path: Path, source_dir: Path, manifest: Mapping[str, object] | None = None) -> None:
-    _replace_dir(path)
-    student.save_pretrained(path, safe_serialization=True)
-    processor.save_pretrained(path)
+def _copy_lineage(source_dir: Path, destination: Path) -> None:
     for name in ("student-build-manifest.json", "compression-lineage.json"):
         source = source_dir / name
         if source.is_file():
-            shutil.copy2(source, path / name)
-    if manifest is not None:
+            shutil.copy2(source, destination / name)
+
+
+def _save_checkpoint(
+    student,
+    processor,
+    path: Path,
+    source_dir: Path,
+    metrics: Mapping[str, object] | None = None,
+) -> None:
+    _replace_dir(path)
+    student.save_pretrained(path, safe_serialization=True)
+    processor.save_pretrained(path)
+    _copy_lineage(source_dir, path)
+    if metrics is not None:
         (path / "checkpoint-metrics.json").write_text(
-            json.dumps(dict(manifest), indent=2, sort_keys=True) + "\n",
+            json.dumps(dict(metrics), indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
 
@@ -690,16 +740,17 @@ def train(args: argparse.Namespace) -> dict[str, object]:
     if not student_dir.is_dir():
         raise FileNotFoundError(f"student checkpoint not found: {student_dir}")
     build_manifest = _load_build_manifest(student_dir)
-    student_original_ids = tuple(int(value) for value in build_manifest.get("text_original_layer_ids") or ())
+    student_original_ids = tuple(
+        int(value) for value in build_manifest.get("text_original_layer_ids") or ()
+    )
     if not student_original_ids:
         raise ValueError("student compression lineage has no text_original_layer_ids")
 
     sources = _stage_sources(plan, args.stage, stage_config)
     records = _corpus_records(sources, args.max_records_per_corpus)
-    holdout_fraction = float(stage_config.get("holdout_fraction", 0.05))
     train_records, holdout_records = _split_records(
         records,
-        holdout_fraction=holdout_fraction,
+        holdout_fraction=float(stage_config.get("holdout_fraction", 0.05)),
         seed=args.seed,
     )
 
@@ -719,10 +770,9 @@ def train(args: argparse.Namespace) -> dict[str, object]:
         model_class=Qwen3VLForConditionalGeneration,
         peft_model_class=PeftModel,
     )
-    teacher_depth = int(teacher.config.text_config.num_hidden_layers)
     teacher_hidden_positions = _teacher_hidden_positions(
         teacher_model,
-        teacher_depth,
+        int(teacher.config.text_config.num_hidden_layers),
         student_original_ids,
     )
 
@@ -746,8 +796,9 @@ def train(args: argparse.Namespace) -> dict[str, object]:
 
     freeze_embeddings = bool(stage_config.get("freeze_embeddings", True))
     freeze_lm_head = bool(stage_config.get("freeze_lm_head", True))
-    freeze_vision_default = spec.freeze_vision_during_kd if args.stage != "specialize" else spec.freeze_vision_during_kd
-    freeze_vision = bool(stage_config.get("freeze_vision", freeze_vision_default))
+    freeze_vision = bool(
+        stage_config.get("freeze_vision", spec.freeze_vision_during_kd)
+    )
     _freeze_for_stage(
         student,
         freeze_embeddings=freeze_embeddings,
@@ -762,7 +813,9 @@ def train(args: argparse.Namespace) -> dict[str, object]:
     hidden_weight = float(stage_config.get("hidden_state_weight", 0.0))
     k3_weight = float(stage_config.get("k3_weight", 0.0))
     learning_rate = float(args.learning_rate or stage_config.get("learning_rate", 5e-6))
-    accumulation = int(args.gradient_accumulation or stage_config.get("gradient_accumulation", 8))
+    accumulation = int(
+        args.gradient_accumulation or stage_config.get("gradient_accumulation", 8)
+    )
     grad_clip = float(args.grad_clip or stage_config.get("grad_clip", 1.0))
     max_updates = int(args.max_updates or stage_config.get("max_updates", 1000))
     eval_interval = int(stage_config.get("eval_interval_updates", 250))
@@ -780,9 +833,9 @@ def train(args: argparse.Namespace) -> dict[str, object]:
     if args.stage == "on_policy" and k3_weight <= 0:
         raise ValueError("on_policy stage requires a positive k3_weight")
 
+    hidden_projector = None
     student_hidden = int(student.config.text_config.hidden_size)
     teacher_hidden = int(teacher.config.text_config.hidden_size)
-    hidden_projector = None
     if hidden_weight > 0 and student_hidden != teacher_hidden:
         hidden_projector = _make_hidden_projector(
             torch,
@@ -795,7 +848,9 @@ def train(args: argparse.Namespace) -> dict[str, object]:
 
     trainable = [parameter for parameter in student.parameters() if parameter.requires_grad]
     if hidden_projector is not None:
-        trainable.extend(parameter for parameter in hidden_projector.parameters() if parameter.requires_grad)
+        trainable.extend(
+            parameter for parameter in hidden_projector.parameters() if parameter.requires_grad
+        )
     if not trainable:
         raise RuntimeError("student stage has no trainable parameters")
     optimizer = torch.optim.AdamW(
@@ -805,16 +860,18 @@ def train(args: argparse.Namespace) -> dict[str, object]:
         weight_decay=float(stage_config.get("weight_decay", 0.0)),
     )
     processor = AutoProcessor.from_pretrained(str(student_dir))
-    gate = gate_from_mapping(stage_config.get("generation_gate") if isinstance(stage_config.get("generation_gate"), Mapping) else None)
+    raw_gate = stage_config.get("generation_gate")
+    gate = gate_from_mapping(raw_gate if isinstance(raw_gate, Mapping) else None)
 
     output = Path(
         args.output
         or str(
             student_entry.get("distilled")
-            or f"artifacts/students/gui-owl-{args.student}-distilled"
+            or f"artifacts/students/v2/gui-owl-{args.student}-distilled"
         )
     )
     output.parent.mkdir(parents=True, exist_ok=True)
+    best_output = output.parent / f"{output.name}-best"
 
     initial_eval = _evaluate_generation(
         torch_module=torch,
@@ -831,7 +888,7 @@ def train(args: argparse.Namespace) -> dict[str, object]:
     )
     initial_failures = generation_gate_failures(initial_eval, gate)
 
-    updates = micro_steps = passes = 0
+    updates = micro_steps = dataset_passes = 0
     completion_tokens = sampled_tokens = 0
     sums = {
         "loss": 0.0,
@@ -840,20 +897,22 @@ def train(args: argparse.Namespace) -> dict[str, object]:
         "hidden": 0.0,
         "k3": 0.0,
     }
-    best_score: tuple[int, float] | None = None
-    best_update: int | None = None
     evaluations: list[dict[str, object]] = [
         {"update": 0, "metrics": initial_eval, "gate_failures": list(initial_failures)}
     ]
+    best_score: tuple[int, float] | None = None
+    best_update: int | None = None
     optimizer.zero_grad(set_to_none=True)
 
     while updates < max_updates:
         epoch_records = list(train_records)
         rng.shuffle(epoch_records)
-        passes += 1
+        dataset_passes += 1
         for record in epoch_records:
             with _teacher_mode(teacher, record.mode, args.teacher_unified):
-                full, prompt_length, completion_length = _encode_full(processor, record.messages, device)
+                full, prompt_length, completion_length = _encode_full(
+                    processor, record.messages, device
+                )
                 completion_tokens += completion_length
                 supervised, forward_kl, hidden = _teacher_forced_terms(
                     torch_module=torch,
@@ -921,20 +980,25 @@ def train(args: argparse.Namespace) -> dict[str, object]:
                     max_new_tokens=eval_max_new_tokens,
                 )
                 failures = generation_gate_failures(metrics, gate)
-                evaluation = {"update": updates, "metrics": metrics, "gate_failures": list(failures)}
+                evaluation = {
+                    "update": updates,
+                    "metrics": metrics,
+                    "gate_failures": list(failures),
+                }
                 evaluations.append(evaluation)
                 score = (
                     len(failures),
-                    float(metrics["mean_teacher_kl"]) + 0.25 * float(metrics["mean_supervised_ce"]),
+                    float(metrics["mean_teacher_kl"])
+                    + 0.25 * float(metrics["mean_supervised_ce"]),
                 )
                 if best_score is None or score < best_score:
                     best_score = score
                     best_update = updates
-                    _save_model(student, processor, output / "best", student_dir, evaluation)
+                    _save_checkpoint(
+                        student, processor, best_output, student_dir, evaluation
+                    )
             if updates >= max_updates:
                 break
-        if not epoch_records:
-            raise RuntimeError("training record set became empty")
 
     final_eval = _evaluate_generation(
         torch_module=torch,
@@ -955,7 +1019,9 @@ def train(args: argparse.Namespace) -> dict[str, object]:
             {"update": updates, "metrics": final_eval, "gate_failures": list(final_failures)}
         )
 
-    _save_model(student, processor, output, student_dir)
+    # The best checkpoint lives next to output, not under it, so replacing the
+    # final directory cannot accidentally erase a stronger intermediate state.
+    _save_checkpoint(student, processor, output, student_dir)
     count = max(1, micro_steps)
     manifest = {
         "schema_version": 2,
@@ -971,7 +1037,7 @@ def train(args: argparse.Namespace) -> dict[str, object]:
         "holdout_records": len(holdout_records),
         "optimizer_updates": updates,
         "micro_steps": micro_steps,
-        "dataset_passes": passes,
+        "dataset_passes": dataset_passes,
         "completion_tokens": completion_tokens,
         "student_sampled_tokens": sampled_tokens,
         "max_updates": max_updates,
@@ -994,6 +1060,7 @@ def train(args: argparse.Namespace) -> dict[str, object]:
         "initial_gate_failures": list(initial_failures),
         "evaluations": evaluations,
         "best_update": best_update,
+        "best_checkpoint": str(best_output) if best_update is not None else None,
         "final_evaluation": final_eval,
         "final_gate_failures": list(final_failures),
         "accepted": not final_failures,
@@ -1010,7 +1077,7 @@ def train(args: argparse.Namespace) -> dict[str, object]:
         raise RuntimeError(
             "distillation finished but free-running generation gate failed: "
             + "; ".join(final_failures)
-            + f". Debug checkpoint retained at {output}; best intermediate is {output / 'best'}."
+            + f". Final debug checkpoint: {output}; best intermediate: {best_output}."
         )
     return manifest
 
@@ -1018,7 +1085,9 @@ def train(args: argparse.Namespace) -> dict[str, object]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--student", required=True, choices=("0.5b", "1b", "1.5b"))
-    parser.add_argument("--stage", default="recovery", choices=("recovery", "on_policy", "specialize"))
+    parser.add_argument(
+        "--stage", default="recovery", choices=("recovery", "on_policy", "specialize")
+    )
     parser.add_argument("--config", default="config/gui_owl_students.json")
     parser.add_argument("--student-model")
     parser.add_argument("--teacher-model")
