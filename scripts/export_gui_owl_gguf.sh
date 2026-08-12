@@ -1,17 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Convert one or all distilled GUI-Owl students to llama.cpp GGUF plus mmproj.
-# Intended for the Vast.ai training host after distillation finishes.
+# Convert one or all accepted v2 GUI-Owl students to llama.cpp GGUF + mmproj.
+# The source checkpoint is resolved from config/gui_owl_students.json so the
+# exporter cannot accidentally pick an older collapsed checkpoint.
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 student_selector="${1:-${STUDENT_SIZE:-all}}"
+student_config="${STUDENT_CONFIG:-$repo_root/config/gui_owl_students.json}"
 llama_cpp_dir="${LLAMA_CPP_DIR:-$HOME/llama.cpp}"
 llama_cpp_ref="${LLAMA_CPP_REF:-b9637}"
-out_dir="${GGUF_OUT_DIR:-$repo_root/artifacts/gguf}"
+out_dir="${GGUF_OUT_DIR:-$repo_root/artifacts/gguf/v2}"
 outtype="${GGUF_OUTTYPE:-bf16}"
 quants="${GGUF_QUANTS:-Q4_0}"
 force="${GGUF_FORCE:-0}"
+allow_unaccepted="${GGUF_ALLOW_UNACCEPTED:-0}"
 install_deps="${LLAMA_CPP_INSTALL_DEPS:-0}"
 build_quantizer="${LLAMA_CPP_BUILD_QUANTIZER:-1}"
 
@@ -21,17 +24,20 @@ Usage:
   bash scripts/export_gui_owl_gguf.sh [0.5b|1b|1.5b|all]
 
 Environment:
+  STUDENT_CONFIG             student config JSON
   LLAMA_CPP_DIR              llama.cpp checkout (default: ~/llama.cpp)
   LLAMA_CPP_REF              ref cloned when checkout is absent (default: b9637)
   LLAMA_CPP_INSTALL_DEPS=1   allow pip install -r llama.cpp/requirements.txt
   LLAMA_CPP_BUILD_QUANTIZER  build llama-quantize when missing (default: 1)
-  GGUF_OUT_DIR               output directory (default: artifacts/gguf)
+  GGUF_OUT_DIR               output directory (default: artifacts/gguf/v2)
   GGUF_OUTTYPE               conversion precision (default: bf16)
   GGUF_QUANTS                space-separated quantizations (default: Q4_0)
   GGUF_FORCE=1               overwrite existing GGUF files
+  GGUF_ALLOW_UNACCEPTED=1    debug-only override for a failed generation gate
 
-The multimodal projector stays at GGUF_OUTTYPE precision. Only the language
-model is quantized by this script.
+By default export requires distillation-manifest.json with accepted=true. The
+multimodal projector remains at GGUF_OUTTYPE precision; only the language model
+is quantized.
 EOF
 }
 
@@ -48,6 +54,45 @@ for command in git python cmake; do
     exit 1
   fi
 done
+
+resolve_source() {
+  local size="$1"
+  python - "$student_config" "$size" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+config = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+entry = config.get("students", {}).get(sys.argv[2], {})
+path = entry.get("distilled")
+if not path:
+    raise SystemExit(f"student config lacks distilled path for {sys.argv[2]}")
+print(path)
+PY
+}
+
+check_acceptance() {
+  local source="$1"
+  if [[ "$allow_unaccepted" == "1" ]]; then
+    return 0
+  fi
+  python - "$source/distillation-manifest.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+if not path.is_file():
+    raise SystemExit(f"refusing GGUF export: distillation manifest missing: {path}")
+value = json.loads(path.read_text(encoding="utf-8"))
+if value.get("accepted") is not True:
+    failures = value.get("final_gate_failures") or []
+    raise SystemExit(
+        "refusing GGUF export: student did not pass free-generation gates"
+        + (f" ({'; '.join(map(str, failures))})" if failures else "")
+    )
+PY
+}
 
 if [[ ! -d "$llama_cpp_dir/.git" ]]; then
   echo "==> Cloning llama.cpp at $llama_cpp_ref into $llama_cpp_dir"
@@ -69,15 +114,10 @@ fi
 
 if ! python "$converter" --help >/dev/null 2>&1; then
   if [[ "$install_deps" == "1" ]]; then
-    echo "==> Installing llama.cpp Python conversion requirements"
     python -m pip install -r "$llama_cpp_dir/requirements.txt"
   else
-    cat >&2 <<EOF
-error: llama.cpp conversion dependencies are missing.
-Run:
-  python -m pip install -r '$llama_cpp_dir/requirements.txt'
-or rerun with LLAMA_CPP_INSTALL_DEPS=1.
-EOF
+    echo "error: llama.cpp conversion dependencies are missing" >&2
+    echo "run: python -m pip install -r '$llama_cpp_dir/requirements.txt'" >&2
     exit 1
   fi
 fi
@@ -88,7 +128,6 @@ if [[ ! -x "$quantizer" ]]; then
     echo "error: llama-quantize is missing: $quantizer" >&2
     exit 1
   fi
-  echo "==> Building CPU llama-quantize"
   cmake -S "$llama_cpp_dir" -B "$llama_cpp_dir/build" \
     -DCMAKE_BUILD_TYPE=Release \
     -DGGML_CUDA=OFF \
@@ -102,11 +141,17 @@ llama_commit="$(git -C "$llama_cpp_dir" rev-parse HEAD)"
 
 do_convert() {
   local size="$1"
-  local source="$repo_root/artifacts/students/gui-owl-${size}-distilled"
-  local base="gui-owl-${size}"
-  local full="$out_dir/${base}-${outtype}.gguf"
-  local mmproj="$out_dir/mmproj-${base}-${outtype}.gguf"
-  local rebuild_full=0
+  local source_rel source base full mmproj rebuild_full
+  source_rel="$(resolve_source "$size")"
+  if [[ "$source_rel" = /* ]]; then
+    source="$source_rel"
+  else
+    source="$repo_root/$source_rel"
+  fi
+  base="gui-owl-${size}"
+  full="$out_dir/${base}-${outtype}.gguf"
+  mmproj="$out_dir/mmproj-${base}-${outtype}.gguf"
+  rebuild_full=0
 
   if [[ ! -f "$source/config.json" ]]; then
     echo "error: distilled $size checkpoint is missing: $source/config.json" >&2
@@ -116,22 +161,17 @@ do_convert() {
     echo "error: distilled $size checkpoint has no safetensors weights: $source" >&2
     return 1
   fi
-  if [[ "$full" == "$mmproj" ]]; then
-    echo "error: model and mmproj output paths unexpectedly collide" >&2
-    return 1
-  fi
+  check_acceptance "$source"
 
   if [[ "$force" == "1" || ! -s "$full" ]]; then
     rebuild_full=1
   elif [[ ! -s "$mmproj" ]]; then
-    # An older exporter could let mmproj conversion overwrite the language GGUF.
-    # Rebuild the language model whenever the canonical projector is missing.
-    echo "==> [$size] mmproj is missing; rebuilding the language GGUF to repair a possible legacy overwrite"
+    echo "==> [$size] mmproj is missing; rebuilding language GGUF too"
     rebuild_full=1
   fi
 
   if [[ "$rebuild_full" == "1" ]]; then
-    echo "==> [$size] Converting language model to $outtype GGUF"
+    echo "==> [$size] Converting accepted language model to $outtype GGUF"
     rm -f "$full"
     python "$converter" "$source" --outfile "$full" --outtype "$outtype"
   else
@@ -141,18 +181,12 @@ do_convert() {
   if [[ "$force" == "1" || ! -s "$mmproj" ]]; then
     echo "==> [$size] Converting multimodal projector to $outtype GGUF"
     rm -f "$mmproj"
-
-    # Do not depend on llama.cpp's exact filename rewriting rules for --mmproj.
-    # When --outfile is an existing directory, llama.cpp writes its canonical
-    # mmproj filename inside that directory. Discover that single output and
-    # rename it to our stable project filename afterwards.
     local mmproj_tmp mmproj_candidate mmproj_count
     mmproj_tmp="$(mktemp -d "$out_dir/.mmproj-${base}.XXXXXX")"
     if ! python "$converter" "$source" --outfile "$mmproj_tmp" --outtype "$outtype" --mmproj; then
       rm -rf "$mmproj_tmp"
       return 1
     fi
-
     mmproj_count="$(find "$mmproj_tmp" -maxdepth 1 -type f -name '*.gguf' | wc -l | tr -d '[:space:]')"
     if [[ "$mmproj_count" != "1" ]]; then
       echo "error: expected exactly one mmproj GGUF for $size, found $mmproj_count" >&2
@@ -160,17 +194,11 @@ do_convert() {
       rm -rf "$mmproj_tmp"
       return 1
     fi
-
     mmproj_candidate="$(find "$mmproj_tmp" -maxdepth 1 -type f -name '*.gguf' -print -quit)"
     mv "$mmproj_candidate" "$mmproj"
     rm -rf "$mmproj_tmp"
   else
     echo "==> [$size] Reusing $mmproj"
-  fi
-
-  if [[ ! -s "$full" || ! -s "$mmproj" ]]; then
-    echo "error: GGUF conversion did not produce both model and mmproj for $size" >&2
-    return 1
   fi
 
   local quant lower quant_file
@@ -209,9 +237,10 @@ def digest(path: Path) -> str:
     return h.hexdigest()
 
 manifest = {
-    "schema_version": 3,
+    "schema_version": 4,
     "student": size,
     "source_checkpoint": os.environ["SOURCE"],
+    "source_generation_gate_required": True,
     "llama_cpp_commit": os.environ["LLAMA_COMMIT"],
     "conversion_outtype": os.environ["OUTTYPE"],
     "quantizations": os.environ["QUANTS"].split(),
@@ -230,6 +259,9 @@ for size in "${sizes[@]}"; do
   do_convert "$size"
 done
 
-echo
-printf 'GGUF export complete. llama.cpp commit: %s\n' "$llama_commit"
-find "$out_dir" -maxdepth 1 -type f \( -name 'gui-owl-*.gguf' -o -name 'mmproj-gui-owl-*.gguf' -o -name '*-export-manifest.json' \) -print | sort
+printf '\nGGUF export complete. llama.cpp commit: %s\n' "$llama_commit"
+find "$out_dir" -maxdepth 1 -type f \( \
+  -name 'gui-owl-*.gguf' -o \
+  -name 'mmproj-gui-owl-*.gguf' -o \
+  -name '*-export-manifest.json' \
+\) -print | sort
