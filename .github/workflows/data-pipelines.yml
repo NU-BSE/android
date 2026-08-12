@@ -11,6 +11,7 @@ on:
       - scripts/generate_qwen_screen_chat.py
       - scripts/train_gui_owl_adapter.py
       - scripts/calibrate_gui_owl_compression.py
+      - scripts/normalize_gui_owl_calibration.py
       - scripts/build_gui_owl_student.py
       - scripts/distill_gui_owl_student.py
       - scripts/run_gui_owl_progressive_distillation.py
@@ -63,6 +64,7 @@ jobs:
             scripts/generate_qwen_screen_chat.py \
             scripts/train_gui_owl_adapter.py \
             scripts/calibrate_gui_owl_compression.py \
+            scripts/normalize_gui_owl_calibration.py \
             scripts/build_gui_owl_student.py \
             scripts/distill_gui_owl_student.py \
             scripts/run_gui_owl_progressive_distillation.py
