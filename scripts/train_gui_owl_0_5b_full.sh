@@ -74,8 +74,15 @@ PY
 
 require_file artifacts/training/gui-policy-unigui-openmobile.jsonl
 require_file artifacts/training/chat-screen-qa-qwen.jsonl
-require_file artifacts/adapters/gui_policy/adapter_config.json
-require_file artifacts/adapters/chat/adapter_config.json
+python - <<'PY'
+from android_drlqn.gui_owl_student import resolve_peft_adapter_dir
+for name, root in (
+    ("gui_policy", "artifacts/adapters/gui_policy"),
+    ("chat", "artifacts/adapters/chat"),
+):
+    resolved = resolve_peft_adapter_dir(root, name)
+    print(f"teacher {name} adapter: {resolved}")
+PY
 
 if ! accepted "$predecessor"; then
   echo "error: 0.5B training requires an accepted 1.5B predecessor: $predecessor" >&2
