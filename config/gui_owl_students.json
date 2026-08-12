@@ -40,7 +40,9 @@
     "0.5b": {
       "source": "artifacts/students/v2/gui-owl-1.5b-distilled",
       "text_depth_schedule": [],
-      "structured_width_pruning": true
+      "structured_width_pruning": true,
+      "source_deepstack_visual_indexes": [5, 11, 17],
+      "target_deepstack_visual_indexes": [2, 5, 8]
     }
   },
   "stages": {
@@ -168,7 +170,7 @@
       "vision_hidden_size": 768,
       "vision_intermediate_size": 3072,
       "vision_heads": 12,
-      "deepstack_visual_indexes": [3, 7, 11],
+      "deepstack_visual_indexes": [2, 5, 8],
       "freeze_vision_during_kd": false,
       "max_relative_parameter_error": 0.20,
       "initialized": "artifacts/students/v2/gui-owl-0.5b-init",
