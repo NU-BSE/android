@@ -1,15 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Package each distilled student for transfer off a disposable GPU host.
-# By default the bundle contains the source Hugging Face checkpoint plus the
-# mobile Q4_0 GGUF, BF16 mmproj, and export manifest. The large BF16 language
-# GGUF is excluded because it is reproducible from the HF checkpoint.
+# Package accepted v2 students for transfer off a disposable GPU host.
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 student_selector="${1:-${STUDENT_SIZE:-all}}"
-gguf_dir="${GGUF_OUT_DIR:-$repo_root/artifacts/gguf}"
-transfer_dir="${TRANSFER_OUT_DIR:-$repo_root/artifacts/transfer}"
+student_config="${STUDENT_CONFIG:-$repo_root/config/gui_owl_students.json}"
+gguf_dir="${GGUF_OUT_DIR:-$repo_root/artifacts/gguf/v2}"
+transfer_dir="${TRANSFER_OUT_DIR:-$repo_root/artifacts/transfer/v2}"
 quant="${TRANSFER_GGUF_QUANT:-Q4_0}"
 outtype="${GGUF_OUTTYPE:-bf16}"
 include_hf="${INCLUDE_HF_CHECKPOINT:-1}"
@@ -21,15 +19,16 @@ Usage:
   bash scripts/package_gui_owl_students.sh [0.5b|1b|1.5b|all]
 
 Environment:
-  TRANSFER_OUT_DIR         bundles directory (default: artifacts/transfer)
-  TRANSFER_GGUF_QUANT      runtime GGUF quantization (default: Q4_0)
-  GGUF_OUTTYPE             mmproj/full conversion precision (default: bf16)
-  INCLUDE_HF_CHECKPOINT=0  omit the full HF source checkpoint
-  INCLUDE_FULL_GGUF=1      also include the large unquantized language GGUF
+  STUDENT_CONFIG            student config JSON
+  GGUF_OUT_DIR              default: artifacts/gguf/v2
+  TRANSFER_OUT_DIR          default: artifacts/transfer/v2
+  TRANSFER_GGUF_QUANT       default: Q4_0
+  GGUF_OUTTYPE              mmproj/full precision (default: bf16)
+  INCLUDE_HF_CHECKPOINT=0   omit the full HF source checkpoint
+  INCLUDE_FULL_GGUF=1       also include the unquantized language GGUF
 
-Each size gets its own uncompressed .tar plus .tar.sha256. GGUF files are
-already dense binary data, so uncompressed tar avoids wasting GPU rental time
-on low-yield recompression and works with macOS tar directly.
+Each size gets an uncompressed .tar plus .tar.sha256. The exporter must already
+have accepted and converted the v2 checkpoint.
 EOF
 }
 
@@ -40,19 +39,37 @@ case "$student_selector" in
   *) usage >&2; exit 2 ;;
 esac
 
+resolve_source_rel() {
+  local size="$1"
+  python - "$student_config" "$size" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+config = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+path = config.get("students", {}).get(sys.argv[2], {}).get("distilled")
+if not path:
+    raise SystemExit(f"student config lacks distilled path for {sys.argv[2]}")
+print(path)
+PY
+}
+
 mkdir -p "$transfer_dir"
 quant_lower="$(printf '%s' "$quant" | tr '[:upper:]' '[:lower:]')"
 
 for size in "${sizes[@]}"; do
   base="gui-owl-${size}"
-  hf_rel="artifacts/students/${base}-distilled"
-  runtime_rel="artifacts/gguf/${base}-${quant_lower}.gguf"
-  mmproj_rel="artifacts/gguf/mmproj-${base}-${outtype}.gguf"
-  manifest_rel="artifacts/gguf/${base}-export-manifest.json"
-  full_rel="artifacts/gguf/${base}-${outtype}.gguf"
+  hf_rel="$(resolve_source_rel "$size")"
+  if [[ "$hf_rel" = /* ]]; then
+    echo "error: packaging expects repository-relative student paths: $hf_rel" >&2
+    exit 1
+  fi
+  runtime_rel="${gguf_dir#$repo_root/}/${base}-${quant_lower}.gguf"
+  mmproj_rel="${gguf_dir#$repo_root/}/mmproj-${base}-${outtype}.gguf"
+  manifest_rel="${gguf_dir#$repo_root/}/${base}-export-manifest.json"
+  full_rel="${gguf_dir#$repo_root/}/${base}-${outtype}.gguf"
 
-  required=("$runtime_rel" "$mmproj_rel" "$manifest_rel")
-  for rel in "${required[@]}"; do
+  for rel in "$runtime_rel" "$mmproj_rel" "$manifest_rel"; do
     if [[ ! -f "$repo_root/$rel" ]]; then
       echo "error: required $size artifact is missing: $rel" >&2
       echo "run: bash scripts/export_gui_owl_gguf.sh $size" >&2
@@ -60,7 +77,7 @@ for size in "${sizes[@]}"; do
     fi
   done
   if [[ "$include_hf" == "1" && ! -d "$repo_root/$hf_rel" ]]; then
-    echo "error: distilled HF checkpoint is missing: $hf_rel" >&2
+    echo "error: accepted distilled HF checkpoint is missing: $hf_rel" >&2
     exit 1
   fi
   if [[ "$include_full_gguf" == "1" && ! -f "$repo_root/$full_rel" ]]; then
@@ -92,6 +109,5 @@ for size in "${sizes[@]}"; do
   du -h "$bundle"
 done
 
-echo
-printf 'Transfer bundles are ready in %s\n' "$transfer_dir"
-printf 'Do not destroy the Vast instance until the Mac-side script verifies every SHA-256.\n'
+printf '\nTransfer bundles are ready in %s\n' "$transfer_dir"
+printf 'Do not destroy the GPU instance until local SHA-256 verification and inference testing pass.\n'
