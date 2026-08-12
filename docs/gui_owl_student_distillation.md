@@ -1,11 +1,11 @@
 # GUI-Owl compact-student distillation v2
 
 This pipeline compresses the trained GUI-Owl 2B teacher into full ~1.5B, ~1B,
-and ~0.5B Qwen3-VL checkpoints. It replaces the original one-shot distillation
-recipe after live llama.cpp tests showed that all three exported Q4_0 artifacts
-were intact but the underlying students had collapsed during training.
+and ~0.5B Qwen3-VL checkpoints. It replaces the original one-shot recipe after
+live llama.cpp tests showed that the Q4_0 files were intact while their source
+students had collapsed during training.
 
-Observed failure from the v1 run:
+Observed v1 failure:
 
 ```text
 size   language params   Q4_0    supervised CE   mean teacher KL   greedy output
@@ -14,13 +14,13 @@ size   language params   Q4_0    supervised CE   mean teacher KL   greedy output
 1.5B   1.12B             681MB   2.36            2.03              immediate EOS
 ```
 
-The 1.5B result is the important regression: teacher-forced CE was much better,
-but free-running generation emitted `<|im_end|>` immediately. Therefore v2 does
-not accept CE or GGUF integrity as proof that a student is usable.
+The 1.5B result is the key regression: teacher-forced CE looked much better, but
+free-running generation emitted `<|im_end|>` immediately. V2 therefore does not
+accept CE or GGUF integrity as proof that a student is usable.
 
 ## Inputs
 
-The specialized teacher behavior still comes from:
+Specialized behavior still comes from:
 
 ```text
 mPLUG/GUI-Owl-1.5-2B-Instruct
@@ -28,21 +28,35 @@ mPLUG/GUI-Owl-1.5-2B-Instruct
 └── chat adapter       <- Qwen3.7-Plus screen-chat data
 ```
 
-The v2 recovery stage additionally requires a broad recovery corpus at:
+Structural recovery additionally uses a broad text-instruction corpus, mixed
+with the existing multimodal specialized records. The default preparer streams
+a filtered subset of `HuggingFaceH4/ultrachat_200k`, pins dataset revision
+`8049631c405ae6576f93f445c6b8166f76f5505a`, validates alternating user/assistant
+turns, requires an assistant-final dialogue, bounds conversation size, removes
+exact duplicates, and writes:
 
 ```text
 artifacts/training/gui-owl-recovery.jsonl
+artifacts/training/gui-owl-recovery.jsonl.manifest.json
 ```
 
-Each line uses the same `{"messages": [...]}` chat-completion shape. An optional
-`teacher_mode` may be `base`, `gui_policy`, or `chat`. The configured broad
-corpus defaults to `base`, meaning teacher adapters are disabled for that
-record. This corpus should contain diverse language/instruction and multimodal
-examples; the small Settings specialization corpus is not accepted as the only
-source for structural recovery.
+Prepare the default 50k records with:
 
-The progressive runner fails before paid training when this required broad
-corpus is absent.
+```bash
+python -m pip install -e '.[data]'
+python scripts/prepare_gui_owl_recovery.py
+```
+
+Or with Docker Compose:
+
+```bash
+docker compose run --rm prepare-recovery
+```
+
+Each output line has `messages`, `teacher_mode: "base"`, and source provenance.
+The broad corpus is text-only; recovery mixes it with the existing GUI/image
+corpora, so the VLM is still exposed to multimodal examples. The progressive
+runner refuses to start paid recovery if the required broad corpus is missing.
 
 ## Architecture targets
 
@@ -54,9 +68,9 @@ corpus is absent.
 
 The language GGUF can report fewer parameters because llama.cpp exports the
 multimodal projector separately; the Hugging Face build manifest remains the
-source of truth for full student parameter count.
+source of truth for the complete student count.
 
-## 1. Calibrate pruning before changing the architecture
+## 1. Calibrate pruning
 
 Run the trained 2B teacher over a bounded GUI/chat calibration sample:
 
@@ -73,19 +87,22 @@ artifacts/calibration/gui-owl-compression.json
 ```
 
 The manifest records activation/residual saliency for text layers, residual
-channels, MLP neurons, Q/KV heads, vision layers, vision channels, vision heads,
-and vision MLP neurons. The 0.5B build is allowed only when calibration actually
-exercised the vision tower.
+channels, MLP neurons, query/KV heads, vision layers, vision channels, vision
+heads, and vision MLP neurons. The 0.5B build is allowed only when calibration
+actually exercised the vision tower.
 
-The old `first N dimensions` prefix-copy rule is no longer used. A width-changing
-build must provide structured calibration selections for every shape-changing
-Qwen3-VL tensor. An unrecognized mapping fails instead of silently leaving a
-random tensor in the student.
+Before a progressive build, the runner normalizes text head selections at the
+**GQA group** level. Qwen3-VL uses two query heads per KV head in both the source
+and 0.5B target. Query and KV heads are therefore never independently top-k
+pruned: a retained KV head keeps its corresponding query-head pair.
+
+The old `first N dimensions` prefix-copy rule is removed. Every width-changing
+tensor must have a structured mapping. Unknown shape changes fail rather than
+silently leaving random weights.
 
 ## 2. Progressive depth compression
 
-Depth-only students are not cut from 28 layers to their final depth in one
-operation.
+Depth-only students are not cut to final size in one step:
 
 ```text
 2B / 28 layers
@@ -99,68 +116,61 @@ accepted 1.5B / 16
   ->  6 -> recovery        ~= 1B
 ```
 
-At every step, layer retention is chosen from the calibration saliency manifest
-while preserving original teacher-layer lineage. The next reduction is made
-from the previous recovered checkpoint, so retained blocks see a gradually
-changing residual distribution rather than an immediate 28->6 jump.
+Layer retention comes from the calibration saliency manifest while original
+teacher-layer lineage is preserved across intermediate checkpoints. Each next
+reduction starts from the preceding recovered model.
 
-The 0.5B model keeps a 16-layer text topology and therefore does **not** use the
-6-layer 1B checkpoint as its structural initialization source. It is
-activation-pruned from the accepted 16-layer 1.5B checkpoint: text width/MLP/
-heads and vision depth/width/MLP/heads are reduced together with consistent
-indices.
+The 0.5B target remains 16 text layers, so it does **not** initialize from the
+six-layer 1B checkpoint. It starts from the accepted 16-layer 1.5B checkpoint
+and structurally prunes text residual width, MLP neurons, GQA head groups,
+vision depth/width/heads/MLPs, and patch-merger channels with consistent indices.
 
 ## 3. Recovery stage
 
-Each structural change is followed by update-based recovery rather than one
-`epochs=1` pass. Default recovery uses:
+Every structural change is followed by update-based recovery rather than one
+`epochs=1` pass. Defaults:
 
 ```text
-supervised CE      0.25
-forward teacher KL 1.00
-hidden-state KD    0.15
-learning rate      3e-6
-final-stage budget 4000 optimizer updates
-accumulation       8
+supervised CE       0.25
+forward teacher KL  1.00
+hidden-state KD     0.15
+learning rate       3e-6
+final-stage budget  4000 optimizer updates
+gradient accumulate 8
 ```
 
 Input embeddings and the tied LM head are frozen. The unchanged vision tower is
-frozen for the same-width 1B/1.5B students. This protects the vocabulary/output
-geometry while transformer blocks recover from structural pruning.
+also frozen for same-width 1B/1.5B recovery. For the 0.5B hidden-width change,
+hidden-state KD uses a temporary learned projection into teacher width.
 
-For the 0.5B hidden-width change, hidden-state KD uses a temporary learned
-projection into teacher width instead of pretending the two residual spaces
-have identical dimensions.
-
-Training manifests report optimizer updates, dataset passes, completion tokens,
-and student-sampled tokens; `records_per_epoch=... / epochs=1` is no longer the
+Manifests report optimizer updates, dataset passes, completion tokens and
+student-sampled tokens. `records_per_epoch` plus `epochs=1` is no longer the
 training-duration contract.
 
 ## 4. On-policy autoregressive KD
 
-After teacher-forced recovery, v2 samples responses from the student itself.
-For every sampled token it evaluates student and teacher log probabilities on
-the same student-generated prefix and applies the K3 reverse-KL estimator:
+After teacher-forced recovery, the student samples its own responses. The
+teacher evaluates those same student-generated prefixes and K3 reverse-KL is
+applied per sampled token:
 
 ```text
 delta = log p_teacher(y_t | y_<t) - log p_student(y_t | y_<t)
 K3    = exp(delta) - delta - 1
 ```
 
-The on-policy stage keeps small supervised/forward-KL anchor losses, but its
-main KD signal is on states the student actually visits during generation. The
-default sampled response length is bounded to 4..64 new tokens.
+A smaller supervised/forward-KL anchor remains. Default student-sampled response
+length is bounded to 4..64 new tokens.
 
 ## 5. Specialization
 
-Only after recovery/on-policy KD passes generation gates does the final low-LR
-stage focus on the Uni-GUI GUI-policy and generated screen-chat corpora. This
-keeps Android specialization after basic generative behavior has recovered.
+Only after recovery and on-policy KD does the final low-LR stage focus on the
+Uni-GUI GUI-policy and generated screen-chat corpora. Android specialization is
+therefore downstream of basic generative recovery.
 
 ## 6. Generation gates
 
-The initialization is evaluated before update 1, then periodically during every
-stage and again at the end. The manifest records:
+Initialization, periodic checkpoints and final checkpoints are tested with
+free-running greedy generation. The manifest records:
 
 ```text
 first_token_eos_rate
@@ -171,7 +181,7 @@ mean_teacher_kl
 gui_parse_rate
 ```
 
-Default structural acceptance requires:
+Default structural acceptance:
 
 ```text
 first-token EOS <= 5%
@@ -179,36 +189,31 @@ empty output    <= 5%
 median output   >= 8 tokens
 ```
 
-Final specialization also requires at least 50% valid GUI-Owl action parsing on
-the held-out GUI sample. A failed gate leaves the checkpoint and metrics for
-debugging but exits non-zero, stopping the progressive cascade.
-
-Periodic best checkpoints are retained so a later collapse does not erase a
-previously stronger intermediate state.
+Final specialization additionally requires at least 50% valid GUI-Owl action
+parsing on its held-out GUI sample. A failed gate retains the final debug model
+and the strongest periodic checkpoint as a sibling `*-best` directory, then
+exits non-zero so the cascade stops.
 
 ## Recommended run order
 
-Prepare the broad recovery JSONL first, then:
-
 ```bash
+# CPU/network: prepare broad recovery data
+python scripts/prepare_gui_owl_recovery.py
+
+# GPU: calibrate the trained 2B teacher
 python scripts/calibrate_gui_owl_compression.py --device cuda
 
-python scripts/run_gui_owl_progressive_distillation.py \
-  --student 1.5b \
-  --device cuda
+# GPU: always establish 1.5B first
+python scripts/run_gui_owl_progressive_distillation.py --student 1.5b --device cuda
 
-python scripts/run_gui_owl_progressive_distillation.py \
-  --student 1b \
-  --device cuda
-
-python scripts/run_gui_owl_progressive_distillation.py \
-  --student 0.5b \
-  --device cuda
+# These require the accepted 1.5B predecessor
+python scripts/run_gui_owl_progressive_distillation.py --student 1b   --device cuda
+python scripts/run_gui_owl_progressive_distillation.py --student 0.5b --device cuda
 ```
 
-The 1B runner refuses to start until its accepted 1.5B predecessor exists. The
-0.5B runner also uses the accepted recovered 1.5B checkpoint as the structured
-initialization source.
+The progressive runner automatically makes GQA head selections group-consistent
+before the first build. `--resume` reuses only checkpoints with
+`distillation-manifest.json` containing `accepted: true`.
 
 For a plumbing-only smoke run:
 
@@ -221,15 +226,15 @@ python scripts/run_gui_owl_progressive_distillation.py \
   --intermediate-recovery-updates 2
 ```
 
-A two-update smoke run is not a quality run and will usually fail the generation
-gate. Use it to expose loading, tensor-shape, processor, and CUDA problems; do
-not export its checkpoint as a model candidate.
+A two-update smoke run is not a quality run and will normally fail its generation
+gate. Use it only to expose loading, tensor-shape, processor and CUDA problems.
 
 ## Docker Compose
 
-On an Ubuntu host with Docker + NVIDIA Container Toolkit:
+On an Ubuntu Docker host:
 
 ```bash
+docker compose run --rm prepare-recovery
 docker compose run --rm calibrate-student
 
 STUDENT_SIZE=1.5b docker compose run --rm progressive-student
@@ -237,14 +242,13 @@ STUDENT_SIZE=1b   docker compose run --rm progressive-student
 STUDENT_SIZE=0.5b docker compose run --rm progressive-student
 ```
 
-The Compose GPU reservation now requests one GPU rather than all GPUs on a
-multi-GPU host. On Vast.ai, where the workload is already running inside the
-provider container, run the Python commands directly instead of Docker-in-
-Docker.
+The Compose GPU reservation requests one GPU, not every GPU on the host. On
+Vast.ai, where the provider already starts the workload inside a container, run
+the Python commands directly instead of Docker-in-Docker.
 
-## Outputs
+## Outputs and GGUF boundary
 
-v2 outputs are deliberately separated from the collapsed v1 checkpoints:
+V2 outputs are isolated from the collapsed v1 checkpoints:
 
 ```text
 artifacts/students/v2/gui-owl-1.5b-distilled/
@@ -252,17 +256,21 @@ artifacts/students/v2/gui-owl-1b-distilled/
 artifacts/students/v2/gui-owl-0.5b-distilled/
 ```
 
-Every final directory must contain `distillation-manifest.json` with:
+Do not run GGUF conversion unless the final directory contains:
 
 ```json
 {"accepted": true}
 ```
 
-before GGUF conversion should be attempted. Export integrity protects transfer
-and conversion correctness; it does not replace the generation gate.
+`scripts/export_gui_owl_gguf.sh` enforces that gate by default and resolves the
+student path from `config/gui_owl_students.json`. V2 GGUF and transfer outputs
+live under `artifacts/gguf/v2` and `artifacts/transfer/v2`.
 
-CI validates Python syntax, dependency-light pruning/gate contracts, shell
-syntax, and Docker Compose configuration. It does not download the 2B model,
-run calibration, execute CUDA training, or prove the structured 0.5B tensor map
-against live model weights; the first bounded GPU build remains a required
-runtime validation.
+## Validation boundary
+
+CI checks Python syntax, dependency-light pruning/GQA/generation-gate contracts,
+shell syntax and `docker compose config -q`. It does not download the 2B model,
+download the recovery dataset, execute calibration hooks on live weights, run
+CUDA KD, validate every 0.5B tensor mapping against a live model, or perform
+llama.cpp conversion. Run a bounded GPU calibration/build before committing to
+a full paid compression job.
