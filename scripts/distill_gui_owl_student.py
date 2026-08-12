@@ -48,6 +48,9 @@ class CorpusSource:
     path: Path
     mode: str
     weight: float
+    # Text-only corpora carry no images, so they exercise the language stack
+    # but never the vision tower.
+    text_only: bool = False
 
 
 def _load_jsonl_messages(
@@ -128,21 +131,55 @@ def _recovery_sources(plan: Mapping[str, object]) -> list[CorpusSource]:
         weight = float(value.get("weight", 1.0))
         if weight <= 0:
             raise ValueError("recovery corpus weights must be positive")
-        result.append(CorpusSource(str(name), path, mode, weight))
+        text_only = bool(value.get("text_only", False))
+        result.append(CorpusSource(str(name), path, mode, weight, text_only))
     if not result:
         raise ValueError("no usable recovery corpora are configured")
     return result
 
 
+def _student_entry(plan: Mapping[str, object], name: str) -> Mapping[str, object]:
+    students = plan.get("students")
+    if isinstance(students, Mapping) and isinstance(students.get(name), Mapping):
+        return students[name]
+    return {}
+
+
 def _stage_sources(
-    plan: Mapping[str, object], stage: str, stage_config: Mapping[str, object]
+    plan: Mapping[str, object],
+    stage: str,
+    stage_config: Mapping[str, object],
+    *,
+    student_entry: Mapping[str, object] | None = None,
+    vision_trainable: bool = False,
 ) -> list[CorpusSource]:
+    student_entry = student_entry or {}
     specialized = _specialized_sources(plan)
     if stage == "specialize":
         return specialized
     recovery = _recovery_sources(plan)
-    if bool(stage_config.get("include_specialized", True)):
+    # Stage A recovers general representations, so it defaults to the broad
+    # corpus alone. Mixing the GUI/chat sets in here is what the v1 recipe did:
+    # the student fitted a narrow distribution before it could form language at
+    # all, reaching a plausible teacher-forced CE while free-running generation
+    # collapsed. Specialization belongs in stage C, after generative recovery.
+    include_specialized = bool(
+        student_entry.get("recovery_include_specialized")
+        if student_entry.get("recovery_include_specialized") is not None
+        else stage_config.get("include_specialized", False)
+    )
+    if include_specialized:
         recovery.extend(specialized)
+    elif vision_trainable and all(source.text_only for source in recovery):
+        # A width-pruned student trains its vision tower, and the broad recovery
+        # corpus is text-only: with no image in any record the tower is never
+        # executed, so its pruned weights would receive no gradient for the whole
+        # of stage A. Refuse rather than silently skip recovering it.
+        raise ValueError(
+            "vision is trainable for this student but every recovery corpus is "
+            "text_only; set include_specialized=true for this stage or add a "
+            "multimodal recovery corpus"
+        )
     return recovery
 
 
@@ -746,7 +783,19 @@ def train(args: argparse.Namespace) -> dict[str, object]:
     if not student_original_ids:
         raise ValueError("student compression lineage has no text_original_layer_ids")
 
-    sources = _stage_sources(plan, args.stage, stage_config)
+    freeze_embeddings = bool(stage_config.get("freeze_embeddings", True))
+    freeze_lm_head = bool(stage_config.get("freeze_lm_head", True))
+    freeze_vision = bool(
+        stage_config.get("freeze_vision", spec.freeze_vision_during_kd)
+    )
+
+    sources = _stage_sources(
+        plan,
+        args.stage,
+        stage_config,
+        student_entry=_student_entry(plan, args.student),
+        vision_trainable=not freeze_vision,
+    )
     records = _corpus_records(sources, args.max_records_per_corpus)
     train_records, holdout_records = _split_records(
         records,
@@ -794,11 +843,6 @@ def train(args: argparse.Namespace) -> dict[str, object]:
     student.config.use_cache = False
     student.gradient_checkpointing_enable()
 
-    freeze_embeddings = bool(stage_config.get("freeze_embeddings", True))
-    freeze_lm_head = bool(stage_config.get("freeze_lm_head", True))
-    freeze_vision = bool(
-        stage_config.get("freeze_vision", spec.freeze_vision_during_kd)
-    )
     _freeze_for_stage(
         student,
         freeze_embeddings=freeze_embeddings,
@@ -825,7 +869,11 @@ def train(args: argparse.Namespace) -> dict[str, object]:
     max_new_tokens = int(stage_config.get("on_policy_max_new_tokens", 64))
     sampling_temperature = float(stage_config.get("sampling_temperature", 0.8))
     top_p = float(stage_config.get("top_p", 0.95))
-    delta_clip = float(stage_config.get("k3_delta_clip", 20.0))
+    # K3 is exp(delta) - delta - 1, so the clip bounds the loss exponentially:
+    # a clip of 20 admits terms near exp(20) ~ 4.9e8, where one token on which
+    # the teacher strongly disagrees dictates the update direction. grad_clip
+    # bounds the step size but not which direction it points.
+    delta_clip = float(stage_config.get("k3_delta_clip", 5.0))
     if min(temperature, learning_rate, grad_clip, accumulation, max_updates) <= 0:
         raise ValueError("invalid positive training hyperparameter")
     if min(supervised_weight, forward_kl_weight, hidden_weight, k3_weight) < 0:

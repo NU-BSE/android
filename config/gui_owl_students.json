@@ -20,7 +20,9 @@
       "path": "artifacts/training/gui-owl-recovery.jsonl",
       "teacher_mode": "base",
       "weight": 2.0,
-      "required": true
+      "required": true,
+      "min_records": 20000,
+      "text_only": true
     }
   },
   "calibration": {
@@ -59,7 +61,7 @@
       "weight_decay": 0.0,
       "freeze_embeddings": true,
       "freeze_lm_head": true,
-      "include_specialized": true,
+      "include_specialized": false,
       "holdout_fraction": 0.05,
       "eval_interval_updates": 250,
       "eval_records": 32,
@@ -76,7 +78,7 @@
       "forward_kl_weight": 0.15,
       "hidden_state_weight": 0.0,
       "k3_weight": 1.0,
-      "k3_delta_clip": 20.0,
+      "k3_delta_clip": 5.0,
       "learning_rate": 0.000002,
       "max_updates": 1500,
       "gradient_accumulation": 8,
@@ -172,6 +174,7 @@
       "vision_heads": 12,
       "deepstack_visual_indexes": [2, 5, 8],
       "freeze_vision_during_kd": false,
+      "recovery_include_specialized": true,
       "max_relative_parameter_error": 0.20,
       "initialized": "artifacts/students/v2/gui-owl-0.5b-init",
       "distilled": "artifacts/students/v2/gui-owl-0.5b-distilled",

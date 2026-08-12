@@ -46,21 +46,49 @@ def _run(command: Sequence[str], *, dry_run: bool) -> None:
         subprocess.run(list(command), check=True)
 
 
+def _count_records(path: Path) -> int:
+    """Count non-blank JSONL records without loading the file into memory."""
+
+    total = 0
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if line.strip():
+                total += 1
+    return total
+
+
 def _require_recovery_corpora(plan: Mapping[str, object]) -> None:
     value = plan.get("recovery_corpora")
     if not isinstance(value, Mapping) or not value:
         raise ValueError("recovery_corpora must be configured before progressive distillation")
     missing: list[str] = []
+    thin: list[str] = []
     for name, raw in value.items():
         if not isinstance(raw, Mapping) or not bool(raw.get("required", True)):
             continue
         path = Path(str(raw.get("path") or ""))
         if not path.is_file():
             missing.append(f"{name}: {path}")
+            continue
+        # Existence is not enough. Stage A has to rebuild general language
+        # ability, and the whole redesign rests on this corpus being broad; a
+        # truncated or half-written file would quietly reproduce the v1 failure
+        # after the GPU bill has already been incurred.
+        minimum = int(raw.get("min_records", 0))
+        if minimum <= 0:
+            continue
+        records = _count_records(path)
+        if records < minimum:
+            thin.append(f"{name}: {records} records < required {minimum} ({path})")
     if missing:
         raise FileNotFoundError(
             "required broad recovery corpus is missing; refusing to start paid compression:\n- "
             + "\n- ".join(missing)
+        )
+    if thin:
+        raise ValueError(
+            "recovery corpus is too small for representation recovery; "
+            "refusing to start paid compression:\n- " + "\n- ".join(thin)
         )
 
 
