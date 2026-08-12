@@ -4,7 +4,12 @@ import json
 from pathlib import Path
 
 from android_drlqn.gui_owl_student import load_student_plan
-from scripts.normalize_gui_owl_calibration import grouped_query_kv_selection
+from scripts.normalize_gui_owl_calibration import (
+    SOURCE_DEEPSTACK_VISUAL_INDEXES,
+    TARGET_DEEPSTACK_VISUAL_INDEXES,
+    deepstack_aligned_vision_selection,
+    grouped_query_kv_selection,
+)
 from scripts.prepare_gui_owl_recovery import DEFAULT_REVISION, _clean_messages
 from scripts.run_gui_owl_progressive_distillation import _accepted
 
@@ -72,12 +77,12 @@ def test_progressive_sources_avoid_one_shot_depth_and_bad_half_b_cascade():
     assert progressive["0.5b"]["source"].endswith("gui-owl-1.5b-distilled")
     assert progressive["0.5b"]["text_depth_schedule"] == []
     assert progressive["0.5b"]["structured_width_pruning"] is True
+    assert progressive["0.5b"]["source_deepstack_visual_indexes"] == [5, 11, 17]
+    assert progressive["0.5b"]["target_deepstack_visual_indexes"] == [2, 5, 8]
+    assert plan["students"]["0.5b"]["deepstack_visual_indexes"] == [2, 5, 8]
 
 
 def test_grouped_query_pruning_keeps_query_heads_with_their_kv_head():
-    # Source GQA ratio is 16 query / 8 KV = two query heads per KV head.
-    # Give KV groups 1, 3, 5, 7 the strongest scores and make individual
-    # query-head scores tempt an independent top-k selector elsewhere.
     q_scores = [
         100.0, 0.0, 1.0, 1.0, 90.0, 0.0, 1.0, 1.0,
         80.0, 0.0, 1.0, 1.0, 70.0, 0.0, 1.0, 1.0,
@@ -91,6 +96,21 @@ def test_grouped_query_pruning_keeps_query_heads_with_their_kv_head():
     )
     assert kv_heads == (1, 3, 5, 7)
     assert q_heads == (2, 3, 6, 7, 10, 11, 14, 15)
+
+
+def test_compact_vision_keeps_source_deepstack_blocks_at_matching_target_taps():
+    # Make high-saliency non-deepstack layers compete for every free slot. The
+    # source taps 5/11/17 must still be retained exactly at compact 2/5/8.
+    scores = [float((index * 17) % 23) for index in range(24)]
+    selected = deepstack_aligned_vision_selection(scores)
+    assert len(selected) == 12
+    assert tuple(sorted(selected)) == selected
+    for source, target in zip(
+        SOURCE_DEEPSTACK_VISUAL_INDEXES,
+        TARGET_DEEPSTACK_VISUAL_INDEXES,
+    ):
+        assert selected[target] == source
+    assert any(index > 17 for index in selected)
 
 
 def test_new_outputs_are_versioned_away_from_collapsed_checkpoints():
