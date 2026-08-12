@@ -10,7 +10,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Sequence
 
-from android_drlqn.gui_owl_student import load_student_plan, spec_from_plan
+from android_drlqn.gui_owl_student import (
+    load_student_plan,
+    resolve_peft_adapter_dir,
+    spec_from_plan,
+)
 
 
 @dataclass(frozen=True)
@@ -58,9 +62,6 @@ def _corpus_records(plan: Mapping[str, object], max_records: int | None) -> list
             raise ValueError("corpus weights must be positive")
         loaded[mode] = (_load_jsonl_messages(path, mode, max_records), weight)
 
-    # Normalize record weights so each corpus contributes approximately its
-    # configured aggregate weight even when Qwen chat has many more rows than
-    # the GUI trajectory corpus.
     total = sum(len(items) for items, _ in loaded.values())
     modes = len(loaded)
     result: list[TrainingRecord] = []
@@ -120,10 +121,10 @@ def _teacher_adapters(plan: Mapping[str, object]) -> dict[str, Path]:
     value = plan.get("teacher_adapters")
     if not isinstance(value, Mapping):
         raise ValueError("student plan must define teacher_adapters")
-    result = {name: Path(str(value.get(name) or "")) for name in ("gui_policy", "chat")}
-    for mode, path in result.items():
-        if not path.is_dir():
-            raise FileNotFoundError(f"teacher {mode} adapter not found: {path}")
+    result: dict[str, Path] = {}
+    for mode in ("gui_policy", "chat"):
+        configured = Path(str(value.get(mode) or ""))
+        result[mode] = resolve_peft_adapter_dir(configured, mode)
     return result
 
 
@@ -157,11 +158,15 @@ def _load_teacher(
         adapters = _teacher_adapters(plan)
         teacher = peft_model_class.from_pretrained(
             base,
-            adapters["gui_policy"],
+            str(adapters["gui_policy"]),
             adapter_name="gui_policy",
             is_trainable=False,
         )
-        teacher.load_adapter(adapters["chat"], adapter_name="chat", is_trainable=False)
+        teacher.load_adapter(
+            str(adapters["chat"]),
+            adapter_name="chat",
+            is_trainable=False,
+        )
     teacher.to(device)
     teacher.eval()
     teacher.config.use_cache = False
@@ -305,14 +310,14 @@ def train(args: argparse.Namespace) -> dict[str, object]:
     )
     try:
         student = Qwen3VLForConditionalGeneration.from_pretrained(
-            student_dir,
+            str(student_dir),
             dtype=dtype,
             attn_implementation="sdpa",
             low_cpu_mem_usage=True,
         )
     except TypeError:
         student = Qwen3VLForConditionalGeneration.from_pretrained(
-            student_dir,
+            str(student_dir),
             torch_dtype=dtype,
             attn_implementation="sdpa",
             low_cpu_mem_usage=True,
@@ -328,7 +333,7 @@ def train(args: argparse.Namespace) -> dict[str, object]:
     if not trainable:
         raise RuntimeError("student has no trainable parameters")
     optimizer = torch.optim.AdamW(trainable, lr=learning_rate, betas=(0.9, 0.95), weight_decay=0.0)
-    processor = AutoProcessor.from_pretrained(student_dir)
+    processor = AutoProcessor.from_pretrained(str(student_dir))
 
     updates = micro_steps = 0
     sums = {"loss": 0.0, "supervised": 0.0, "logit_kl": 0.0, "hidden": 0.0}
@@ -372,7 +377,13 @@ def train(args: argparse.Namespace) -> dict[str, object]:
         optimizer.zero_grad(set_to_none=True)
         updates += 1
 
-    output = Path(args.output or str(student_entry.get("distilled") or f"artifacts/students/gui-owl-{args.student}-distilled"))
+    output = Path(
+        args.output
+        or str(
+            student_entry.get("distilled")
+            or f"artifacts/students/gui-owl-{args.student}-distilled"
+        )
+    )
     output.mkdir(parents=True, exist_ok=True)
     student.save_pretrained(output, safe_serialization=True)
     processor.save_pretrained(output)
@@ -382,7 +393,9 @@ def train(args: argparse.Namespace) -> dict[str, object]:
         "student_initialization": str(student_dir),
         "teacher_model": teacher_model,
         "teacher_unified": bool(args.teacher_unified),
-        "teacher_adapters": None if args.teacher_unified else {key: str(value) for key, value in _teacher_adapters(plan).items()},
+        "teacher_adapters": None
+        if args.teacher_unified
+        else {key: str(value) for key, value in _teacher_adapters(plan).items()},
         "records_per_epoch": len(records),
         "epochs": epochs,
         "micro_steps": micro_steps,
