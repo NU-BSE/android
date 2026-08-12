@@ -1,8 +1,8 @@
 """Architecture planning helpers for GUI-Owl Qwen3-VL student distillation.
 
 This module is intentionally dependency-light: configuration shaping, layer
-routing, and checkpoint-key remapping can be tested without downloading model
-weights or importing PyTorch/Transformers.
+routing, checkpoint-key remapping, and adapter-path resolution can be tested
+without downloading model weights or importing PyTorch/Transformers.
 """
 from __future__ import annotations
 
@@ -65,8 +65,6 @@ class StudentSpec:
 
 
 DEFAULT_STUDENT_SPECS: dict[str, StudentSpec] = {
-    # Keep the complete GUI-Owl vision tower and shrink only the language depth.
-    # With the published 2B architecture, 16 text blocks lands close to 1.5B.
     "1.5b": StudentSpec(
         name="1.5b",
         target_parameters=1_500_000_000,
@@ -82,8 +80,6 @@ DEFAULT_STUDENT_SPECS: dict[str, StudentSpec] = {
         deepstack_visual_indexes=(5, 11, 17),
         freeze_vision_during_kd=True,
     ),
-    # Six 2048-wide text blocks preserve the original tokenizer/vision interface
-    # while taking the full checkpoint to roughly the 1B class.
     "1b": StudentSpec(
         name="1b",
         target_parameters=1_000_000_000,
@@ -99,9 +95,6 @@ DEFAULT_STUDENT_SPECS: dict[str, StudentSpec] = {
         deepstack_visual_indexes=(5, 11, 17),
         freeze_vision_during_kd=True,
     ),
-    # A genuine ~0.5B student cannot retain the 2B model's 2048-wide embedding
-    # and full vision tower. Both modalities are narrowed; the 1B distilled
-    # student is the recommended logit teacher for the final KD stage.
     "0.5b": StudentSpec(
         name="0.5b",
         target_parameters=500_000_000,
@@ -143,12 +136,7 @@ def build_student_config_dict(
     teacher_config: Mapping[str, object],
     spec: StudentSpec,
 ) -> dict[str, object]:
-    """Return a Qwen3-VL config dictionary shaped for ``spec``.
-
-    Special-token IDs, vocabulary, RoPE settings, patch sizes and processor
-    contracts remain inherited from the teacher. Only architecture dimensions
-    needed for compression are changed.
-    """
+    """Return a Qwen3-VL config dictionary shaped for ``spec``."""
 
     if str(teacher_config.get("model_type") or "") != "qwen3_vl":
         raise ValueError("GUI-Owl student builder requires a qwen3_vl teacher config")
@@ -220,6 +208,28 @@ def relative_parameter_error(actual: int, target: int) -> float:
     return abs(actual - target) / target
 
 
+def resolve_peft_adapter_dir(root: str | Path, adapter_name: str) -> Path:
+    """Resolve a PEFT adapter directory saved either flat or as a named adapter.
+
+    ``PeftModel.save_pretrained`` stores non-default adapters below
+    ``<save_directory>/<adapter_name>``. Older/local checkpoints may instead put
+    ``adapter_config.json`` directly in ``save_directory``. Accept both layouts
+    and return the directory that actually contains the PEFT config.
+    """
+
+    root_path = Path(root)
+    candidates = (root_path, root_path / adapter_name)
+    for candidate in candidates:
+        if (candidate / "adapter_config.json").is_file():
+            return candidate
+    if not root_path.is_dir():
+        raise FileNotFoundError(f"teacher {adapter_name} adapter directory not found: {root_path}")
+    raise FileNotFoundError(
+        f"teacher {adapter_name} adapter_config.json not found under "
+        f"{root_path} or {root_path / adapter_name}"
+    )
+
+
 def load_student_plan(path: str | Path) -> dict[str, object]:
     value = json.loads(Path(path).read_text(encoding="utf-8"))
     if not isinstance(value, Mapping):
@@ -251,6 +261,7 @@ __all__ = [
     "load_student_plan",
     "prefix_copy_shape",
     "relative_parameter_error",
+    "resolve_peft_adapter_dir",
     "spec_from_plan",
     "teacher_key_for_student",
 ]
