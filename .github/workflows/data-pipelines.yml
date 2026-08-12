@@ -20,6 +20,7 @@ on:
       - tests/test_qwen_screen_qa.py
       - tests/test_gui_owl_adapter_data.py
       - tests/test_gui_owl_student.py
+      - tests/test_gguf_export_scripts.py
       - config/gui_owl_dual_lora_data.json
       - config/gui_owl_students.json
       - pyproject.toml
@@ -74,4 +75,5 @@ jobs:
             tests/test_ui_mopd.py \
             tests/test_qwen_screen_qa.py \
             tests/test_gui_owl_adapter_data.py \
-            tests/test_gui_owl_student.py
+            tests/test_gui_owl_student.py \
+            tests/test_gguf_export_scripts.py
