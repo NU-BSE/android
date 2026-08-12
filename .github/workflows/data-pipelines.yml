@@ -12,6 +12,9 @@ on:
       - scripts/train_gui_owl_adapter.py
       - scripts/build_gui_owl_student.py
       - scripts/distill_gui_owl_student.py
+      - scripts/export_gui_owl_gguf.sh
+      - scripts/package_gui_owl_students.sh
+      - scripts/pull_gui_owl_students_to_mac.sh
       - tests/test_unigui_openmobile.py
       - tests/test_ui_mopd.py
       - tests/test_qwen_screen_qa.py
@@ -27,6 +30,7 @@ on:
       - docs/docker_ubuntu_training.md
       - docs/unigui_qwen_ui_mopd.md
       - docs/gui_owl_student_distillation.md
+      - docs/gui_owl_gguf_mac_transfer.md
       - .github/workflows/data-pipelines.yml
   workflow_dispatch:
 
@@ -56,6 +60,11 @@ jobs:
             scripts/train_gui_owl_adapter.py \
             scripts/build_gui_owl_student.py \
             scripts/distill_gui_owl_student.py
+      - name: Validate shell scripts
+        run: |
+          bash -n scripts/export_gui_owl_gguf.sh
+          bash -n scripts/package_gui_owl_students.sh
+          bash -n scripts/pull_gui_owl_students_to_mac.sh
       - name: Validate Docker Compose
         run: docker compose config -q
       - name: Run focused tests
