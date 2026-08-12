@@ -5,6 +5,7 @@ from pathlib import Path
 
 from android_drlqn.gui_owl_student import load_student_plan
 from scripts.normalize_gui_owl_calibration import grouped_query_kv_selection
+from scripts.prepare_gui_owl_recovery import DEFAULT_REVISION, _clean_messages
 from scripts.run_gui_owl_progressive_distillation import _accepted
 
 
@@ -38,6 +39,30 @@ def test_recovery_requires_broad_data_and_on_policy_uses_k3():
     assert int(plan["stages"]["on_policy"]["on_policy_min_new_tokens"]) >= 1
 
 
+def test_recovery_preparer_is_pinned_and_filters_incomplete_dialogues():
+    assert len(DEFAULT_REVISION) == 40
+    good = _clean_messages(
+        [
+            {"role": "user", "content": "Explain gravity simply."},
+            {"role": "assistant", "content": "Gravity attracts masses."},
+        ],
+        max_turn_chars=100,
+        max_total_chars=200,
+    )
+    assert good is not None
+    assert good[-1]["role"] == "assistant"
+    incomplete = _clean_messages(
+        [
+            {"role": "user", "content": "Question"},
+            {"role": "assistant", "content": "Answer"},
+            {"role": "user", "content": "Follow-up"},
+        ],
+        max_turn_chars=100,
+        max_total_chars=200,
+    )
+    assert incomplete is None
+
+
 def test_progressive_sources_avoid_one_shot_depth_and_bad_half_b_cascade():
     plan = _plan()
     progressive = plan["progressive"]
@@ -53,8 +78,10 @@ def test_grouped_query_pruning_keeps_query_heads_with_their_kv_head():
     # Source GQA ratio is 16 query / 8 KV = two query heads per KV head.
     # Give KV groups 1, 3, 5, 7 the strongest scores and make individual
     # query-head scores tempt an independent top-k selector elsewhere.
-    q_scores = [100.0, 0.0, 1.0, 1.0, 90.0, 0.0, 1.0, 1.0,
-                80.0, 0.0, 1.0, 1.0, 70.0, 0.0, 1.0, 1.0]
+    q_scores = [
+        100.0, 0.0, 1.0, 1.0, 90.0, 0.0, 1.0, 1.0,
+        80.0, 0.0, 1.0, 1.0, 70.0, 0.0, 1.0, 1.0,
+    ]
     kv_scores = [0.0, 1000.0, 0.0, 900.0, 0.0, 800.0, 0.0, 700.0]
     q_heads, kv_heads = grouped_query_kv_selection(
         q_scores,
