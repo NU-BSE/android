@@ -115,6 +115,21 @@ services:
       - --output
       - artifacts/adapters/chat
 
+  prepare-recovery:
+    <<: *runtime
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+      HUGGING_FACE_HUB_TOKEN: ${HF_TOKEN:-}
+      RECOVERY_RECORDS: ${RECOVERY_RECORDS:-50000}
+      RECOVERY_MIN_RECORDS: ${RECOVERY_MIN_RECORDS:-10000}
+    command:
+      - python
+      - scripts/prepare_gui_owl_recovery.py
+      - --max-records
+      - "${RECOVERY_RECORDS:-50000}"
+      - --min-records
+      - "${RECOVERY_MIN_RECORDS:-10000}"
+
   calibrate-student:
     <<: *gpu-runtime
     environment:
