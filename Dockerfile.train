@@ -27,6 +27,7 @@ RUN python -m pip install --upgrade pip \
     && python -m pip install --no-cache-dir --no-deps 'torchvision==0.20.1' \
     && python -m pip install --no-cache-dir \
         'huggingface-hub>=0.34' \
+        'datasets>=3.0' \
         'transformers>=4.57.1' \
         'peft>=0.13' \
         'safetensors>=0.4' \
