@@ -8,6 +8,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
+export PYTHONPATH="$repo_root${PYTHONPATH:+:$PYTHONPATH}"
 
 DEVICE="${DEVICE:-cuda}"
 RESUME="${RESUME:-1}"
@@ -109,8 +110,6 @@ else
 fi
 require_file "$calibration"
 
-# 0.5B width pruning is permitted only after the calibration actually exercised
-# the vision tower and produced the structured channel/head selectors.
 python - "$calibration" <<'PY'
 import json
 import sys
