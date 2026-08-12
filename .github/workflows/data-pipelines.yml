@@ -75,6 +75,8 @@ jobs:
             scripts/build_gui_owl_student.py \
             scripts/distill_gui_owl_student.py \
             scripts/run_gui_owl_progressive_distillation.py
+      - name: Validate direct progressive runner entrypoint
+        run: python scripts/run_gui_owl_progressive_distillation.py --help >/dev/null
       - name: Validate shell scripts
         run: |
           bash -n scripts/train_gui_owl_1_5b_full.sh
