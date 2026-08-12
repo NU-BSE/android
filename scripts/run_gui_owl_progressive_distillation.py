@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Run calibrated progressive GUI-Owl compression for one target size.
 
-This orchestration intentionally performs multiple recoveries instead of a
-single destructive architecture jump.  Every distillation subprocess has a
-free-generation acceptance gate; a failed stage stops the cascade before more
-GPU time is spent on a broken predecessor.
+Every destructive architecture change is followed by gated recovery. The runner
+also normalizes calibration head selections so Qwen3-VL grouped-query attention
+keeps its original query/KV group relationships during 0.5B width pruning.
 """
 from __future__ import annotations
 
@@ -16,6 +15,7 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 from android_drlqn.gui_owl_student import load_student_plan
+from scripts.normalize_gui_owl_calibration import normalize_manifest
 
 
 def _student_entry(plan: Mapping[str, object], name: str) -> dict[str, object]:
@@ -52,9 +52,7 @@ def _require_recovery_corpora(plan: Mapping[str, object]) -> None:
         raise ValueError("recovery_corpora must be configured before progressive distillation")
     missing: list[str] = []
     for name, raw in value.items():
-        if not isinstance(raw, Mapping):
-            continue
-        if not bool(raw.get("required", True)):
+        if not isinstance(raw, Mapping) or not bool(raw.get("required", True)):
             continue
         path = Path(str(raw.get("path") or ""))
         if not path.is_file():
@@ -66,32 +64,42 @@ def _require_recovery_corpora(plan: Mapping[str, object]) -> None:
         )
 
 
+def _calibration_path(plan: Mapping[str, object], override: str | None) -> Path:
+    if override:
+        return Path(override)
+    value = plan.get("calibration")
+    if isinstance(value, Mapping) and value.get("manifest"):
+        return Path(str(value["manifest"]))
+    return Path("artifacts/calibration/gui-owl-compression.json")
+
+
 def run(args: argparse.Namespace) -> dict[str, object]:
     plan = load_student_plan(args.config)
     _require_recovery_corpora(plan)
     student_entry = _student_entry(plan, args.student)
     progressive = _progressive_entry(plan, args.student)
     teacher_model = args.teacher_model or str(plan.get("initialization_teacher") or "")
-    source = Path(str(progressive.get("source") or ""))
+    if not teacher_model:
+        raise ValueError("initialization teacher is missing")
+
     source_arg = str(progressive.get("source") or "")
     if not source_arg:
         raise ValueError("progressive compression source is missing")
-    # Hub model IDs are not local paths and therefore need no filesystem check.
-    if "/" in source_arg and source_arg.startswith("artifacts/") and not source.is_dir():
+    source = Path(source_arg)
+    if source_arg.startswith("artifacts/") and not source.is_dir():
         raise FileNotFoundError(
-            f"required predecessor checkpoint is missing: {source}. "
-            "Run the preceding size first."
+            f"required predecessor checkpoint is missing: {source}. Run the preceding size first."
         )
 
-    calibration = Path(
-        args.calibration_manifest
-        or str((plan.get("calibration") or {}).get("manifest") if isinstance(plan.get("calibration"), Mapping) else "")
-        or "artifacts/calibration/gui-owl-compression.json"
-    )
+    calibration = _calibration_path(plan, args.calibration_manifest)
     if not calibration.is_file():
         raise FileNotFoundError(
             f"calibration manifest is missing: {calibration}; run calibrate_gui_owl_compression.py first"
         )
+    if not args.dry_run:
+        normalized = normalize_manifest(calibration)
+        if normalized.get("gqa_group_consistent") is not True:
+            raise RuntimeError("calibration did not preserve grouped-query attention head groups")
 
     schedule_raw = progressive.get("text_depth_schedule") or ()
     if not isinstance(schedule_raw, Sequence) or isinstance(schedule_raw, (str, bytes)):
@@ -124,6 +132,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                     "--overwrite",
                 ]
                 _run(build_command, dry_run=args.dry_run)
+
                 recover_command = [
                     sys.executable,
                     "scripts/distill_gui_owl_student.py",
@@ -141,19 +150,26 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                     args.device,
                 ]
                 if args.max_records_per_corpus is not None:
-                    recover_command += ["--max-records-per-corpus", str(args.max_records_per_corpus)]
+                    recover_command += [
+                        "--max-records-per-corpus",
+                        str(args.max_records_per_corpus),
+                    ]
                 if args.max_updates is not None:
                     recover_command += ["--max-updates", str(args.max_updates)]
                 elif not is_final_depth:
-                    recover_command += ["--max-updates", str(args.intermediate_recovery_updates)]
+                    recover_command += [
+                        "--max-updates",
+                        str(args.intermediate_recovery_updates),
+                    ]
                 _run(recover_command, dry_run=args.dry_run)
             current_source = str(recovered_dir)
             stages.append({"depth": depth, "checkpoint": str(recovered_dir)})
     else:
-        # 0.5B: keep the recovered 1.5B depth lineage and perform one calibrated
-        # structured width/vision prune.  It must not be initialized from the
-        # six-layer 1B checkpoint because that would require increasing depth.
-        init_dir = Path(str(student_entry.get("initialized") or work_root / "width-init"))
+        # 0.5B keeps a 16-layer topology, so initialize width/vision pruning from
+        # the accepted 16-layer 1.5B checkpoint rather than the six-layer 1B.
+        init_dir = Path(
+            str(student_entry.get("initialized") or work_root / "width-init")
+        )
         recovered_dir = work_root / "width-recovered"
         if not (args.resume and _accepted(recovered_dir)):
             build_command = [
@@ -187,7 +203,10 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 args.device,
             ]
             if args.max_records_per_corpus is not None:
-                recover_command += ["--max-records-per-corpus", str(args.max_records_per_corpus)]
+                recover_command += [
+                    "--max-records-per-corpus",
+                    str(args.max_records_per_corpus),
+                ]
             if args.max_updates is not None:
                 recover_command += ["--max-updates", str(args.max_updates)]
             _run(recover_command, dry_run=args.dry_run)
@@ -214,14 +233,22 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 args.device,
             ]
             if args.max_records_per_corpus is not None:
-                command += ["--max-records-per-corpus", str(args.max_records_per_corpus)]
+                command += [
+                    "--max-records-per-corpus",
+                    str(args.max_records_per_corpus),
+                ]
             if args.max_updates is not None:
                 command += ["--max-updates", str(args.max_updates)]
             _run(command, dry_run=args.dry_run)
         current_source = str(on_policy_dir)
         stages.append({"stage": "on_policy", "checkpoint": current_source})
 
-    final = Path(str(student_entry.get("distilled") or f"artifacts/students/v2/gui-owl-{args.student}-distilled"))
+    final = Path(
+        str(
+            student_entry.get("distilled")
+            or f"artifacts/students/v2/gui-owl-{args.student}-distilled"
+        )
+    )
     if not args.skip_specialize:
         if not (args.resume and _accepted(final)):
             command = [
@@ -241,7 +268,10 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 args.device,
             ]
             if args.max_records_per_corpus is not None:
-                command += ["--max-records-per-corpus", str(args.max_records_per_corpus)]
+                command += [
+                    "--max-records-per-corpus",
+                    str(args.max_records_per_corpus),
+                ]
             if args.max_updates is not None:
                 command += ["--max-updates", str(args.max_updates)]
             _run(command, dry_run=args.dry_run)
@@ -251,6 +281,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     manifest = {
         "student": args.student,
         "calibration_manifest": str(calibration),
+        "gqa_group_consistent": True if not args.dry_run else None,
         "teacher_model": teacher_model,
         "stages": stages,
         "final_checkpoint": current_source,
@@ -258,7 +289,10 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     }
     path = work_root / "progressive-run-manifest.json"
     if not args.dry_run:
-        path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        path.write_text(
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
     return manifest
 
 
