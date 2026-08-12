@@ -62,9 +62,8 @@ if [[ ! -f "$converter" ]]; then
   echo "error: llama.cpp converter not found: $converter" >&2
   exit 1
 fi
-
 if ! grep -q -- '--mmproj' "$converter"; then
-  echo "error: this llama.cpp checkout does not expose --mmproj; use a newer Qwen3-VL-capable checkout" >&2
+  echo "error: this llama.cpp checkout does not expose --mmproj" >&2
   exit 1
 fi
 
@@ -78,8 +77,6 @@ error: llama.cpp conversion dependencies are missing.
 Run:
   python -m pip install -r '$llama_cpp_dir/requirements.txt'
 or rerun with LLAMA_CPP_INSTALL_DEPS=1.
-The default is deliberately non-mutating so a Vast PyTorch/CUDA environment is
-not unexpectedly replaced.
 EOF
     exit 1
   fi
@@ -109,6 +106,7 @@ do_convert() {
   local base="gui-owl-${size}"
   local full="$out_dir/${base}-${outtype}.gguf"
   local mmproj="$out_dir/mmproj-${base}-${outtype}.gguf"
+  local rebuild_full=0
 
   if [[ ! -f "$source/config.json" ]]; then
     echo "error: distilled $size checkpoint is missing: $source/config.json" >&2
@@ -118,9 +116,24 @@ do_convert() {
     echo "error: distilled $size checkpoint has no safetensors weights: $source" >&2
     return 1
   fi
+  if [[ "$full" == "$mmproj" ]]; then
+    echo "error: model and mmproj output paths unexpectedly collide" >&2
+    return 1
+  fi
 
   if [[ "$force" == "1" || ! -s "$full" ]]; then
-    echo "==> [$size] Converting full model to $outtype GGUF"
+    rebuild_full=1
+  elif [[ ! -s "$mmproj" ]]; then
+    # Older versions of this exporter passed --outfile "$full" to the mmproj
+    # conversion. llama.cpp b9637 does not add a prefix for an explicit custom
+    # outfile, so that run could overwrite the language GGUF with the mmproj.
+    # Rebuild the language GGUF whenever we see that legacy failure pattern.
+    echo "==> [$size] mmproj is missing; rebuilding the language GGUF to repair a possible legacy overwrite"
+    rebuild_full=1
+  fi
+
+  if [[ "$rebuild_full" == "1" ]]; then
+    echo "==> [$size] Converting language model to $outtype GGUF"
     rm -f "$full"
     python "$converter" "$source" --outfile "$full" --outtype "$outtype"
   else
@@ -130,8 +143,10 @@ do_convert() {
   if [[ "$force" == "1" || ! -s "$mmproj" ]]; then
     echo "==> [$size] Converting multimodal projector to $outtype GGUF"
     rm -f "$mmproj"
-    # llama.cpp prefixes the supplied output basename with 'mmproj-'.
-    python "$converter" "$source" --outfile "$full" --outtype "$outtype" --mmproj
+    # Important: with a custom --outfile, llama.cpp b9637 writes exactly that
+    # path; it does not prepend mmproj-. Pass the dedicated path explicitly so
+    # the projector can never overwrite the language GGUF.
+    python "$converter" "$source" --outfile "$mmproj" --outtype "$outtype" --mmproj
   else
     echo "==> [$size] Reusing $mmproj"
   fi
@@ -145,7 +160,7 @@ do_convert() {
   for quant in $quants; do
     lower="$(printf '%s' "$quant" | tr '[:upper:]' '[:lower:]')"
     quant_file="$out_dir/${base}-${lower}.gguf"
-    if [[ "$force" == "1" || ! -s "$quant_file" ]]; then
+    if [[ "$force" == "1" || "$rebuild_full" == "1" || ! -s "$quant_file" ]]; then
       echo "==> [$size] Quantizing language model as $quant"
       rm -f "$quant_file"
       "$quantizer" "$full" "$quant_file" "$quant"
@@ -177,7 +192,7 @@ def digest(path: Path) -> str:
     return h.hexdigest()
 
 manifest = {
-    "schema_version": 1,
+    "schema_version": 2,
     "student": size,
     "source_checkpoint": os.environ["SOURCE"],
     "llama_cpp_commit": os.environ["LLAMA_COMMIT"],
