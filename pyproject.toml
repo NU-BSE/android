@@ -25,6 +25,9 @@ train = [
   "pillow>=10.0"
 ]
 
+[tool.setuptools]
+py-modules = ["project_gui_owl_train"]
+
 [tool.setuptools.packages.find]
 include = ["android_drlqn*"]
 
