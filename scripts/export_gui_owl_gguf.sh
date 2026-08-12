@@ -124,10 +124,8 @@ do_convert() {
   if [[ "$force" == "1" || ! -s "$full" ]]; then
     rebuild_full=1
   elif [[ ! -s "$mmproj" ]]; then
-    # Older versions of this exporter passed --outfile "$full" to the mmproj
-    # conversion. llama.cpp b9637 does not add a prefix for an explicit custom
-    # outfile, so that run could overwrite the language GGUF with the mmproj.
-    # Rebuild the language GGUF whenever we see that legacy failure pattern.
+    # An older exporter could let mmproj conversion overwrite the language GGUF.
+    # Rebuild the language model whenever the canonical projector is missing.
     echo "==> [$size] mmproj is missing; rebuilding the language GGUF to repair a possible legacy overwrite"
     rebuild_full=1
   fi
@@ -143,10 +141,29 @@ do_convert() {
   if [[ "$force" == "1" || ! -s "$mmproj" ]]; then
     echo "==> [$size] Converting multimodal projector to $outtype GGUF"
     rm -f "$mmproj"
-    # Important: with a custom --outfile, llama.cpp b9637 writes exactly that
-    # path; it does not prepend mmproj-. Pass the dedicated path explicitly so
-    # the projector can never overwrite the language GGUF.
-    python "$converter" "$source" --outfile "$mmproj" --outtype "$outtype" --mmproj
+
+    # Do not depend on llama.cpp's exact filename rewriting rules for --mmproj.
+    # When --outfile is an existing directory, llama.cpp writes its canonical
+    # mmproj filename inside that directory. Discover that single output and
+    # rename it to our stable project filename afterwards.
+    local mmproj_tmp mmproj_candidate mmproj_count
+    mmproj_tmp="$(mktemp -d "$out_dir/.mmproj-${base}.XXXXXX")"
+    if ! python "$converter" "$source" --outfile "$mmproj_tmp" --outtype "$outtype" --mmproj; then
+      rm -rf "$mmproj_tmp"
+      return 1
+    fi
+
+    mmproj_count="$(find "$mmproj_tmp" -maxdepth 1 -type f -name '*.gguf' | wc -l | tr -d '[:space:]')"
+    if [[ "$mmproj_count" != "1" ]]; then
+      echo "error: expected exactly one mmproj GGUF for $size, found $mmproj_count" >&2
+      find "$mmproj_tmp" -maxdepth 1 -type f -print >&2 || true
+      rm -rf "$mmproj_tmp"
+      return 1
+    fi
+
+    mmproj_candidate="$(find "$mmproj_tmp" -maxdepth 1 -type f -name '*.gguf' -print -quit)"
+    mv "$mmproj_candidate" "$mmproj"
+    rm -rf "$mmproj_tmp"
   else
     echo "==> [$size] Reusing $mmproj"
   fi
@@ -192,7 +209,7 @@ def digest(path: Path) -> str:
     return h.hexdigest()
 
 manifest = {
-    "schema_version": 2,
+    "schema_version": 3,
     "student": size,
     "source_checkpoint": os.environ["SOURCE"],
     "llama_cpp_commit": os.environ["LLAMA_COMMIT"],
