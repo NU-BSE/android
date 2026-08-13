@@ -30,12 +30,21 @@ def test_specialization_keeps_an_on_policy_anchor():
 def test_targeted_retry_reuses_depth_16_and_never_exports_gguf():
     text = Path("scripts/retry_gui_owl_1_5b_policy_alignment.sh").read_text(encoding="utf-8")
     assert "depth-16-recovered" in text
+    assert "gui-bridge" in text
     assert "--stage on_policy" in text
-    assert "--stage specialize" in text
+    assert text.count("--stage specialize") >= 2
     assert "--max-records-per-corpus" in text
+    assert "distill_gui_owl_policy_aligned.py" in text
     assert "run_gui_owl_progressive_distillation.py" not in text
     assert "export_gui_owl_gguf.sh" not in text
     assert "llama-quantize" not in text
+
+
+def test_policy_aligned_entrypoint_stratifies_gui_holdout():
+    text = Path("scripts/distill_gui_owl_policy_aligned.py").read_text(encoding="utf-8")
+    assert "MIN_GUI_EVAL_RECORDS = 8" in text
+    assert "record.mode == \"gui_policy\"" in text
+    assert "base._evaluate_generation = _stratified_evaluate_generation" in text
 
 
 def test_policy_diagnostic_saves_concrete_generations():
