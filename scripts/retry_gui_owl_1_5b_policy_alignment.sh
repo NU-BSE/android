@@ -43,13 +43,15 @@ PY
 
 check_gui_summary() {
   local summary="$1"
-  python - "$summary" <<'PY'
+  local label="${2:-GUI}"
+  python - "$summary" "$label" <<'PY'
 import json
 import sys
 from pathlib import Path
 path = Path(sys.argv[1])
+label = sys.argv[2]
 if not path.is_file():
-    raise SystemExit(f"missing GUI diagnostic summary: {path}")
+    raise SystemExit(f"missing {label} diagnostic summary: {path}")
 x = json.loads(path.read_text(encoding="utf-8"))
 failures = []
 if float(x.get("first_token_eos_rate", 1.0)) > 0.05:
@@ -61,8 +63,8 @@ if float(x.get("median_generated_tokens", 0.0)) < 8.0:
 if float(x.get("gui_parse_rate", 0.0)) < 0.50:
     failures.append(f"gui_parse={x.get('gui_parse_rate')}")
 if failures:
-    raise SystemExit("GUI-only diagnostic gate failed: " + "; ".join(failures))
-print("GUI-only diagnostic gate passed:", json.dumps(x, sort_keys=True))
+    raise SystemExit(label + " gate failed: " + "; ".join(failures))
+print(label + " gate passed:", json.dumps(x, sort_keys=True))
 PY
 }
 
@@ -74,7 +76,7 @@ run_gui_diagnostic() {
     --checkpoint "$checkpoint" \
     --device "$DEVICE" \
     --output "$output"
-  check_gui_summary "${output}.summary.json"
+  check_gui_summary "${output}.summary.json" "$name"
 }
 
 if ! accepted "$source_checkpoint"; then
@@ -94,6 +96,30 @@ if [[ "$DEVICE" == cuda* ]]; then
   nvidia-smi
 fi
 
+# PRE-FLIGHT: validate the actual 2B GUI-policy teacher before spending another
+# student-training hour. A student cannot recover the Action:/<tool_call> grammar
+# through forward/reverse KL when the selected PEFT teacher itself emits EOS or
+# malformed GUI outputs. This also verifies the nested adapter path at runtime.
+echo '==> Preflight: evaluating 2B GUI-policy teacher adapter'
+python scripts/evaluate_gui_owl_policy_teacher.py \
+  --device "$DEVICE" \
+  --output "$diagnostics/teacher-gui.jsonl"
+if ! check_gui_summary "$diagnostics/teacher-gui.jsonl.summary.json" teacher; then
+  echo 'error: GUI-policy teacher adapter failed free-running validation.' >&2
+  echo 'Do not retrain the compact student yet; inspect/retrain the gui_policy adapter first.' >&2
+  echo "inspect: $diagnostics/teacher-gui.jsonl" >&2
+  exit 1
+fi
+
+# Record the accepted structural checkpoint's GUI behavior as a baseline. It is
+# allowed to fail the syntax gate because specialization has not happened yet;
+# this file tells us whether the bridge is improving or degrading it.
+echo '==> Baseline: evaluating accepted depth-16 recovery checkpoint on GUI prompts'
+python scripts/evaluate_gui_owl_policy_checkpoint.py \
+  --checkpoint "$source_checkpoint" \
+  --device "$DEVICE" \
+  --output "$diagnostics/source-depth16-gui.jsonl" || true
+
 # Preserve the failed attempt without copying large safetensors. mv is cheap on
 # the same filesystem and leaves the accepted depth-16 recovery checkpoint intact.
 mkdir -p "$archive_root"
@@ -111,10 +137,11 @@ do
 done
 printf 'archived previous policy checkpoints under: %s\n' "$archive_root"
 
-# The previous specialization began with gui_parse_rate=0, proving that the
-# incoming on-policy checkpoint had never learned the GUI-Owl action grammar.
-# First establish that grammar on GUI/chat data while retaining K3, then ask the
-# broader on-policy phase to preserve it.
+# The previous bridge used on-policy generation with min_new_tokens=4. That
+# forcibly suppressed EOS while sampling, so K3 never observed the exact
+# first-token EOS action that the greedy gate was reporting. The config now uses
+# min_new_tokens=0: an EOS sample is still a real sampled token and gives K3 a
+# gradient against excessive student EOS probability.
 echo '==> GUI syntax bridge from accepted depth-16 recovery'
 set +e
 python scripts/distill_gui_owl_policy_aligned.py \
