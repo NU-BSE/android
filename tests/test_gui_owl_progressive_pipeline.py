@@ -41,7 +41,9 @@ def test_recovery_requires_broad_data_and_on_policy_uses_k3():
     assert recovery["path"].endswith("gui-owl-recovery.jsonl")
     assert float(plan["stages"]["recovery"]["k3_weight"]) == 0.0
     assert float(plan["stages"]["on_policy"]["k3_weight"]) > 0.0
-    assert int(plan["stages"]["on_policy"]["on_policy_min_new_tokens"]) >= 1
+    # K3 must be able to observe and penalize a sampled first-token EOS rather
+    # than forcing the student to continue for several tokens.
+    assert int(plan["stages"]["on_policy"]["on_policy_min_new_tokens"]) == 0
 
 
 def test_recovery_preparer_is_pinned_and_filters_incomplete_dialogues():
