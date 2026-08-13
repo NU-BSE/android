@@ -15,6 +15,7 @@ on:
       - scripts/normalize_gui_owl_calibration.py
       - scripts/build_gui_owl_student.py
       - scripts/distill_gui_owl_student.py
+      - scripts/distill_gui_owl_policy_aligned.py
       - scripts/run_gui_owl_progressive_distillation.py
       - scripts/evaluate_gui_owl_policy_checkpoint.py
       - scripts/retry_gui_owl_1_5b_policy_alignment.sh
@@ -80,6 +81,7 @@ jobs:
             scripts/normalize_gui_owl_calibration.py \
             scripts/build_gui_owl_student.py \
             scripts/distill_gui_owl_student.py \
+            scripts/distill_gui_owl_policy_aligned.py \
             scripts/run_gui_owl_progressive_distillation.py \
             scripts/evaluate_gui_owl_policy_checkpoint.py
       - name: Validate shell scripts
