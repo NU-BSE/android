@@ -11,7 +11,8 @@ export PYTHONPATH="$repo_root${PYTHONPATH:+:$PYTHONPATH}"
 
 DEVICE="${DEVICE:-cuda}"
 GUI_BRIDGE_MAX_RECORDS_PER_CORPUS="${GUI_BRIDGE_MAX_RECORDS_PER_CORPUS:-4000}"
-GUI_BRIDGE_MAX_UPDATES="${GUI_BRIDGE_MAX_UPDATES:-600}"
+GUI_BRIDGE_CANARY_UPDATES="${GUI_BRIDGE_CANARY_UPDATES:-100}"
+GUI_BRIDGE_MAX_UPDATES="${GUI_BRIDGE_MAX_UPDATES:-500}"
 ON_POLICY_MAX_RECORDS_PER_CORPUS="${ON_POLICY_MAX_RECORDS_PER_CORPUS:-4000}"
 ON_POLICY_MAX_UPDATES="${ON_POLICY_MAX_UPDATES:-1500}"
 SPECIALIZE_MAX_RECORDS_PER_CORPUS="${SPECIALIZE_MAX_RECORDS_PER_CORPUS:-}"
@@ -19,6 +20,7 @@ SPECIALIZE_MAX_UPDATES="${SPECIALIZE_MAX_UPDATES:-1200}"
 PACKAGE_WEIGHTS="${PACKAGE_WEIGHTS:-1}"
 
 source_checkpoint="artifacts/students/v2/progressive/1.5b/depth-16-recovered"
+canary="artifacts/students/v2/progressive/1.5b/gui-bridge-canary"
 bridge="artifacts/students/v2/progressive/1.5b/gui-bridge"
 on_policy="artifacts/students/v2/progressive/1.5b/on-policy"
 final="artifacts/students/v2/gui-owl-1.5b-distilled"
@@ -68,6 +70,44 @@ print(label + " gate passed:", json.dumps(x, sort_keys=True))
 PY
 }
 
+check_canary_progress() {
+  local before="$1"
+  local after="$2"
+  python - "$before" "$after" <<'PY'
+import json
+import sys
+from pathlib import Path
+before = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+after = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+
+def f(x, name, default):
+    return float(x.get(name, default))
+
+before_eos = f(before, "first_token_eos_rate", 1.0)
+after_eos = f(after, "first_token_eos_rate", 1.0)
+before_empty = f(before, "empty_generation_rate", 1.0)
+after_empty = f(after, "empty_generation_rate", 1.0)
+before_parse = f(before, "gui_parse_rate", 0.0)
+after_parse = f(after, "gui_parse_rate", 0.0)
+before_median = f(before, "median_generated_tokens", 0.0)
+after_median = f(after, "median_generated_tokens", 0.0)
+
+improved = (
+    after_eos < before_eos
+    or after_empty < before_empty
+    or after_parse > before_parse
+    or after_median > before_median
+)
+print("canary before:", json.dumps(before, sort_keys=True))
+print("canary after: ", json.dumps(after, sort_keys=True))
+if not improved:
+    raise SystemExit(
+        "GUI bridge canary made no free-generation progress; refusing another 500-update paid run"
+    )
+print("GUI bridge canary improved at least one free-generation metric; continuing")
+PY
+}
+
 run_gui_diagnostic() {
   local checkpoint="$1"
   local name="$2"
@@ -76,7 +116,6 @@ run_gui_diagnostic() {
     --checkpoint "$checkpoint" \
     --device "$DEVICE" \
     --output "$output"
-  check_gui_summary "${output}.summary.json" "$name"
 }
 
 if ! accepted "$source_checkpoint"; then
@@ -86,7 +125,8 @@ fi
 
 printf '=== GUI-Owl 1.5B policy-alignment retry ===\n'
 printf 'source: %s\n' "$source_checkpoint"
-printf 'GUI bridge updates: %s\n' "$GUI_BRIDGE_MAX_UPDATES"
+printf 'GUI bridge canary updates: %s\n' "$GUI_BRIDGE_CANARY_UPDATES"
+printf 'GUI bridge continuation updates: %s\n' "$GUI_BRIDGE_MAX_UPDATES"
 printf 'on-policy cap per corpus: %s\n' "$ON_POLICY_MAX_RECORDS_PER_CORPUS"
 printf 'on-policy updates: %s\n' "$ON_POLICY_MAX_UPDATES"
 printf 'diagnostics: %s\n' "$diagnostics"
@@ -113,17 +153,16 @@ fi
 
 # Record the accepted structural checkpoint's GUI behavior as a baseline. It is
 # allowed to fail the syntax gate because specialization has not happened yet;
-# this file tells us whether the bridge is improving or degrading it.
+# the canary must improve at least one free-generation metric over this baseline.
 echo '==> Baseline: evaluating accepted depth-16 recovery checkpoint on GUI prompts'
-python scripts/evaluate_gui_owl_policy_checkpoint.py \
-  --checkpoint "$source_checkpoint" \
-  --device "$DEVICE" \
-  --output "$diagnostics/source-depth16-gui.jsonl" || true
+run_gui_diagnostic "$source_checkpoint" source-depth16
 
-# Preserve the failed attempt without copying large safetensors. mv is cheap on
-# the same filesystem and leaves the accepted depth-16 recovery checkpoint intact.
+# Preserve failed policy attempts without copying large safetensors. mv is cheap
+# on the same filesystem and leaves the accepted depth-16 recovery checkpoint intact.
 mkdir -p "$archive_root"
 for path in \
+  "$canary" \
+  "${canary}-best" \
   "$bridge" \
   "${bridge}-best" \
   "$on_policy" \
@@ -137,17 +176,35 @@ do
 done
 printf 'archived previous policy checkpoints under: %s\n' "$archive_root"
 
-# The previous bridge used on-policy generation with min_new_tokens=4. That
-# forcibly suppressed EOS while sampling, so K3 never observed the exact
-# first-token EOS action that the greedy gate was reporting. The config now uses
-# min_new_tokens=0: an EOS sample is still a real sampled token and gives K3 a
-# gradient against excessive student EOS probability.
-echo '==> GUI syntax bridge from accepted depth-16 recovery'
-set +e
-python scripts/distill_gui_owl_policy_aligned.py \
+# Cheap canary before another full bridge. The policy-aligned entrypoint fixes
+# the old zero-gradient K3 clamp, upweights the first completion token, and this
+# bridge trains on GUI policy records only. --allow-gate-failure lets us inspect
+# movement after 100 updates instead of requiring the final 50%% parse gate yet.
+echo '==> Canary: 100-update GUI-only syntax recovery'
+GUI_OWL_ONLY_GUI=1 python scripts/distill_gui_owl_policy_aligned.py \
   --student 1.5b \
   --stage specialize \
   --student-model "$source_checkpoint" \
+  --teacher-model mPLUG/GUI-Owl-1.5-2B-Instruct \
+  --output "$canary" \
+  --device "$DEVICE" \
+  --max-records-per-corpus "$GUI_BRIDGE_MAX_RECORDS_PER_CORPUS" \
+  --max-updates "$GUI_BRIDGE_CANARY_UPDATES" \
+  --allow-gate-failure
+
+echo '==> Saving concrete canary generations'
+run_gui_diagnostic "$canary" canary
+check_canary_progress \
+  "$diagnostics/source-depth16-gui.jsonl.summary.json" \
+  "$diagnostics/canary-gui.jsonl.summary.json"
+
+# Continue from the canary rather than paying for those first 100 updates twice.
+echo '==> GUI-only syntax bridge continuation'
+set +e
+GUI_OWL_ONLY_GUI=1 python scripts/distill_gui_owl_policy_aligned.py \
+  --student 1.5b \
+  --stage specialize \
+  --student-model "$canary" \
   --teacher-model mPLUG/GUI-Owl-1.5-2B-Instruct \
   --output "$bridge" \
   --device "$DEVICE" \
@@ -158,7 +215,8 @@ set -e
 
 if [[ -d "$bridge" ]]; then
   echo '==> Saving concrete GUI-bridge generations'
-  run_gui_diagnostic "$bridge" bridge || bridge_status=1
+  run_gui_diagnostic "$bridge" bridge
+  check_gui_summary "$diagnostics/bridge-gui.jsonl.summary.json" bridge || bridge_status=1
 fi
 if [[ "$bridge_status" -ne 0 ]]; then
   echo "error: GUI syntax bridge did not reach the required free-running action grammar." >&2
@@ -189,7 +247,8 @@ set -e
 
 if [[ -d "$on_policy" ]]; then
   echo '==> Saving concrete on-policy GUI generations'
-  run_gui_diagnostic "$on_policy" on-policy || on_policy_status=1
+  run_gui_diagnostic "$on_policy" on-policy
+  check_gui_summary "$diagnostics/on-policy-gui.jsonl.summary.json" on-policy || on_policy_status=1
 fi
 if [[ "$on_policy_status" -ne 0 ]]; then
   echo "error: on-policy alignment failed to preserve the GUI syntax gate." >&2
@@ -222,7 +281,8 @@ set -e
 
 if [[ -d "$final" ]]; then
   echo '==> Saving concrete final GUI generations'
-  run_gui_diagnostic "$final" final || specialize_status=1
+  run_gui_diagnostic "$final" final
+  check_gui_summary "$diagnostics/final-gui.jsonl.summary.json" final || specialize_status=1
 fi
 if [[ "$specialize_status" -ne 0 ]]; then
   echo "error: final specialization failed its GUI/free-generation gate." >&2
