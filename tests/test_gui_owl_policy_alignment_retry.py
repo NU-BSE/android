@@ -20,16 +20,26 @@ def test_on_policy_must_learn_gui_syntax_before_specialization():
 
 
 def test_k3_sampling_does_not_hide_first_token_eos():
-    """The student must be allowed to sample EOS so reverse-KL can penalize it.
-
-    The failed policy bridge used min_new_tokens=4. Greedy evaluation could emit
-    EOS immediately, but the student-sampled K3 path forcibly suppressed that
-    action and therefore never trained on the failure the gate was measuring.
-    """
+    """The student must be allowed to sample EOS so reverse-KL can penalize it."""
 
     stages = _plan()["stages"]
     assert int(stages["on_policy"]["on_policy_min_new_tokens"]) == 0
     assert int(stages["specialize"]["on_policy_min_new_tokens"]) == 0
+
+
+def test_policy_aligned_k3_clip_keeps_gradient_outside_the_clip_interval():
+    """A hard torch.clamp would zero the exact gradient needed for EOS collapse."""
+
+    text = Path("scripts/distill_gui_owl_policy_aligned.py").read_text(encoding="utf-8")
+    assert "raw_delta + (clipped_delta - raw_delta).detach()" in text
+    assert "base._sampled_k3_loss = _sampled_k3_with_live_clipped_gradient" in text
+
+
+def test_policy_aligned_teacher_forcing_emphasizes_the_first_completion_token():
+    text = Path("scripts/distill_gui_owl_policy_aligned.py").read_text(encoding="utf-8")
+    assert "FIRST_TOKEN_WEIGHT" in text
+    assert "token_weights[:, 0] = FIRST_TOKEN_WEIGHT" in text
+    assert "base._teacher_forced_terms = _weighted_teacher_forced_terms" in text
 
 
 def test_specialization_keeps_an_on_policy_anchor():
@@ -43,23 +53,28 @@ def test_specialization_keeps_an_on_policy_anchor():
 def test_targeted_retry_reuses_depth_16_and_never_exports_gguf():
     text = Path("scripts/retry_gui_owl_1_5b_policy_alignment.sh").read_text(encoding="utf-8")
     assert "depth-16-recovered" in text
+    assert "gui-bridge-canary" in text
     assert "gui-bridge" in text
     assert "--stage on_policy" in text
-    assert text.count("--stage specialize") >= 2
+    assert text.count("--stage specialize") >= 3
     assert "--max-records-per-corpus" in text
     assert "distill_gui_owl_policy_aligned.py" in text
+    assert "GUI_OWL_ONLY_GUI=1" in text
     assert "run_gui_owl_progressive_distillation.py" not in text
     assert "export_gui_owl_gguf.sh" not in text
     assert "llama-quantize" not in text
 
 
-def test_retry_preflights_the_actual_gui_teacher_before_archiving_or_training():
+def test_retry_preflights_teacher_then_runs_a_small_canary_before_full_bridge():
     text = Path("scripts/retry_gui_owl_1_5b_policy_alignment.sh").read_text(encoding="utf-8")
     teacher = text.index("evaluate_gui_owl_policy_teacher.py")
     archive = text.index("archived previous policy checkpoints")
-    bridge = text.index("GUI syntax bridge from accepted depth-16 recovery")
-    assert teacher < archive < bridge
+    canary = text.index("Canary: 100-update GUI-only syntax recovery")
+    continuation = text.index("GUI-only syntax bridge continuation")
+    assert teacher < archive < canary < continuation
     assert "teacher-gui.jsonl.summary.json" in text
+    assert "check_canary_progress" in text
+    assert "--allow-gate-failure" in text
 
 
 def test_policy_aligned_entrypoint_stratifies_gui_holdout():
