@@ -19,11 +19,24 @@ def test_on_policy_must_learn_gui_syntax_before_specialization():
     assert int(on_policy["eval_interval_updates"]) <= 100
 
 
+def test_k3_sampling_does_not_hide_first_token_eos():
+    """The student must be allowed to sample EOS so reverse-KL can penalize it.
+
+    The failed policy bridge used min_new_tokens=4. Greedy evaluation could emit
+    EOS immediately, but the student-sampled K3 path forcibly suppressed that
+    action and therefore never trained on the failure the gate was measuring.
+    """
+
+    stages = _plan()["stages"]
+    assert int(stages["on_policy"]["on_policy_min_new_tokens"]) == 0
+    assert int(stages["specialize"]["on_policy_min_new_tokens"]) == 0
+
+
 def test_specialization_keeps_an_on_policy_anchor():
     stage = _plan()["stages"]["specialize"]
     assert float(stage["k3_weight"]) > 0.0
     assert float(stage["k3_delta_clip"]) <= 6.0
-    assert int(stage["on_policy_min_new_tokens"]) >= 1
+    assert int(stage["on_policy_min_new_tokens"]) == 0
     assert float(stage["generation_gate"]["gui_parse_rate_min"]) >= 0.5
 
 
@@ -40,6 +53,15 @@ def test_targeted_retry_reuses_depth_16_and_never_exports_gguf():
     assert "llama-quantize" not in text
 
 
+def test_retry_preflights_the_actual_gui_teacher_before_archiving_or_training():
+    text = Path("scripts/retry_gui_owl_1_5b_policy_alignment.sh").read_text(encoding="utf-8")
+    teacher = text.index("evaluate_gui_owl_policy_teacher.py")
+    archive = text.index("archived previous policy checkpoints")
+    bridge = text.index("GUI syntax bridge from accepted depth-16 recovery")
+    assert teacher < archive < bridge
+    assert "teacher-gui.jsonl.summary.json" in text
+
+
 def test_policy_aligned_entrypoint_stratifies_gui_holdout():
     text = Path("scripts/distill_gui_owl_policy_aligned.py").read_text(encoding="utf-8")
     assert "MIN_GUI_EVAL_RECORDS = 8" in text
@@ -53,3 +75,12 @@ def test_policy_diagnostic_saves_concrete_generations():
     assert '"gui_parse_valid"' in text
     assert '"target"' in text
     assert "parse_gui_owl_output" in text
+
+
+def test_teacher_policy_preflight_uses_named_peft_adapter_and_saves_generations():
+    text = Path("scripts/evaluate_gui_owl_policy_teacher.py").read_text(encoding="utf-8")
+    assert "resolve_peft_adapter_dir" in text
+    assert "PeftModel.from_pretrained" in text
+    assert "model.set_adapter(args.adapter_name)" in text
+    assert '"generation"' in text
+    assert '"gui_parse_valid"' in text
