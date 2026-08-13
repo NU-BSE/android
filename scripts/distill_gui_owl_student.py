@@ -715,7 +715,13 @@ def _evaluate_generation(
         "median_generated_tokens": float(statistics.median(lengths)),
         "mean_supervised_ce": sum(ce_values) / len(ce_values),
         "mean_teacher_kl": sum(kl_values) / len(kl_values),
-        "gui_parse_rate": gui_valid / gui_total if gui_total else 1.0,
+        # Stage A holds out broad recovery data only, so gui_total is 0 there.
+        # Reporting an unmeasured parse rate as 1.0 made a GUI-collapsed
+        # checkpoint look accepted in checkpoint-metrics.json; gui_records is
+        # what tells the two apart, and the gate refuses to read the rate
+        # without it.
+        "gui_records": float(gui_total),
+        "gui_parse_rate": gui_valid / gui_total if gui_total else 0.0,
     }
 
 

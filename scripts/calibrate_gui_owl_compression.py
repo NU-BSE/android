@@ -19,6 +19,7 @@ from android_drlqn.gui_owl_student import (
     load_student_plan,
     ranked_indices,
     resolve_peft_adapter_dir,
+    TEXT_TAIL_PROTECTED_LAYERS,
     select_salient_layer_ids,
 )
 
@@ -357,7 +358,9 @@ def calibrate(args: argparse.Namespace) -> dict[str, object]:
     for depth in (24, 20, 16, 12, 9, 6):
         if depth > len(selected):
             continue
-        selected = select_salient_layer_ids(text_layer_scores, selected, depth)
+        selected = select_salient_layer_ids(
+            text_layer_scores, selected, depth, protect_tail=TEXT_TAIL_PROTECTED_LAYERS
+        )
         depth_layers[str(depth)] = list(selected)
 
     recommended: dict[str, object] = {
