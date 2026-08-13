@@ -16,6 +16,8 @@ on:
       - scripts/build_gui_owl_student.py
       - scripts/distill_gui_owl_student.py
       - scripts/run_gui_owl_progressive_distillation.py
+      - scripts/evaluate_gui_owl_policy_checkpoint.py
+      - scripts/retry_gui_owl_1_5b_policy_alignment.sh
       - scripts/train_gui_owl_1_5b_full.sh
       - scripts/train_gui_owl_1b_full.sh
       - scripts/train_gui_owl_0_5b_full.sh
@@ -29,6 +31,7 @@ on:
       - tests/test_gui_owl_adapter_data.py
       - tests/test_gui_owl_student.py
       - tests/test_gui_owl_progressive_pipeline.py
+      - tests/test_gui_owl_policy_alignment_retry.py
       - tests/test_full_training_scripts.py
       - tests/test_gguf_export_scripts.py
       - config/gui_owl_dual_lora_data.json
@@ -77,9 +80,11 @@ jobs:
             scripts/normalize_gui_owl_calibration.py \
             scripts/build_gui_owl_student.py \
             scripts/distill_gui_owl_student.py \
-            scripts/run_gui_owl_progressive_distillation.py
+            scripts/run_gui_owl_progressive_distillation.py \
+            scripts/evaluate_gui_owl_policy_checkpoint.py
       - name: Validate shell scripts
         run: |
+          bash -n scripts/retry_gui_owl_1_5b_policy_alignment.sh
           bash -n scripts/train_gui_owl_1_5b_full.sh
           bash -n scripts/train_gui_owl_1b_full.sh
           bash -n scripts/train_gui_owl_0_5b_full.sh
@@ -98,5 +103,6 @@ jobs:
             tests/test_gui_owl_adapter_data.py \
             tests/test_gui_owl_student.py \
             tests/test_gui_owl_progressive_pipeline.py \
+            tests/test_gui_owl_policy_alignment_retry.py \
             tests/test_full_training_scripts.py \
             tests/test_gguf_export_scripts.py
