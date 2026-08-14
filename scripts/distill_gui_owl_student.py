@@ -209,6 +209,41 @@ def _corpus_records(
     return result
 
 
+MIN_GUI_EVAL_RECORDS = 8
+
+
+def _select_evaluation_records(
+    records: Sequence[TrainingRecord], max_records: int
+) -> list[TrainingRecord]:
+    """Reserve a GUI quota so a GUI-gated stage never scores zero GUI records.
+
+    The holdout split is stratified per corpus, but the broad recovery corpus
+    outnumbers the GUI corpus by an order of magnitude, so the head of the
+    shuffled holdout regularly contains no gui_policy record at all. That left
+    the on_policy/specialize gui_parse_rate gate scoring nothing, and passing.
+    """
+    values = list(records)
+    if max_records >= len(values):
+        return values
+    gui = [record for record in values if record.mode == "gui_policy"]
+    if not gui:
+        return values[:max_records]
+
+    quota = min(len(gui), max_records, max(MIN_GUI_EVAL_RECORDS, max_records // 2))
+    selected = gui[:quota]
+    for record in values:
+        if len(selected) >= max_records:
+            break
+        if record.mode != "gui_policy":
+            selected.append(record)
+    # Only reached when the non-GUI remainder cannot fill the budget.
+    for record in gui[quota:]:
+        if len(selected) >= max_records:
+            break
+        selected.append(record)
+    return selected
+
+
 def _split_records(
     records: Sequence[TrainingRecord], *, holdout_fraction: float, seed: int
 ) -> tuple[list[TrainingRecord], list[TrainingRecord]]:
@@ -652,7 +687,7 @@ def _evaluate_generation(
 ) -> dict[str, float]:
     from project_gui_owl_train import parse_gui_owl_output
 
-    selected = list(records[:max_records])
+    selected = _select_evaluation_records(records, max_records)
     if not selected:
         raise ValueError("generation evaluation has no records")
     eos = processor.tokenizer.eos_token_id
