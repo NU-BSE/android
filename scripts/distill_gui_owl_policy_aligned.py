@@ -1,21 +1,24 @@
 #!/usr/bin/env python3
 """Run GUI-Owl distillation with policy-alignment safeguards.
 
-This entrypoint keeps the base trainer/checkpoint format but fixes three details
-that matter when a compressed student has collapsed to first-token EOS on GUI
-prompts:
+This entrypoint keeps the base trainer/checkpoint format but fixes details that
+matter when a compressed student has collapsed to first-token EOS or generic
+assistant mode on GUI prompts:
 
 * generation evaluation is stratified so GUI policy records receive a material
   share of the holdout budget;
 * K3 clips its delta value with a straight-through clamp so badly mismatched
   sampled tokens still receive a bounded, non-zero gradient instead of falling
   outside ``torch.clamp`` and getting zero gradient;
-* teacher-forced CE/KL upweight the first completion token, because recovery of
-  ``Action:`` must happen before free-running generation can ever reach the
-  remaining tool-call tokens.
+* teacher-forced CE/KL can upweight the first completion token and an optional
+  early completion prefix so recovery can progress from choosing ``Action`` to
+  continuing the ``Action: ... <tool_call>`` grammar.
 
-Set ``GUI_OWL_ONLY_GUI=1`` for the short syntax bridge to train only on the
-GUI-policy corpus; later on-policy/final stages can use the normal corpus mix.
+Set ``GUI_OWL_ONLY_GUI=1`` for a short syntax bridge to train only on the
+GUI-policy corpus. ``GUI_OWL_FIRST_TOKEN_WEIGHT`` controls token zero;
+``GUI_OWL_PREFIX_TOKENS`` and ``GUI_OWL_PREFIX_WEIGHT`` optionally weight an
+early teacher-forced prefix, with the first-token weight taking precedence.
+Later on-policy/final stages can use the normal corpus mix and default weights.
 """
 from __future__ import annotations
 
@@ -50,7 +53,16 @@ _DEFAULT_FIRST_TOKEN_WEIGHT = 8.0 if _STAGE == "specialize" else 4.0
 FIRST_TOKEN_WEIGHT = float(
     os.environ.get("GUI_OWL_FIRST_TOKEN_WEIGHT", str(_DEFAULT_FIRST_TOKEN_WEIGHT))
 )
+PREFIX_TOKENS = int(os.environ.get("GUI_OWL_PREFIX_TOKENS", "0"))
+PREFIX_WEIGHT = float(os.environ.get("GUI_OWL_PREFIX_WEIGHT", "1.0"))
 ONLY_GUI = os.environ.get("GUI_OWL_ONLY_GUI", "0") == "1"
+
+if FIRST_TOKEN_WEIGHT <= 0:
+    raise ValueError("GUI_OWL_FIRST_TOKEN_WEIGHT must be positive")
+if PREFIX_TOKENS < 0:
+    raise ValueError("GUI_OWL_PREFIX_TOKENS must be non-negative")
+if PREFIX_WEIGHT <= 0:
+    raise ValueError("GUI_OWL_PREFIX_WEIGHT must be positive")
 
 
 def _stratified_evaluate_generation(**kwargs):
@@ -158,7 +170,13 @@ def _weighted_teacher_forced_terms(
         raise RuntimeError("teacher and student logits must share vocabulary/completion shape")
 
     token_weights = student_logits.new_ones(targets.shape, dtype=torch_module.float32)
+    prefix_tokens = min(PREFIX_TOKENS, int(targets.shape[1]))
+    if prefix_tokens > 0 and PREFIX_WEIGHT != 1.0:
+        token_weights[:, :prefix_tokens] = PREFIX_WEIGHT
     if targets.shape[1] > 0 and FIRST_TOKEN_WEIGHT != 1.0:
+        # Token zero remains independently controllable so mode selection can
+        # stay strongly anchored while the rest of the early GUI grammar is
+        # being recovered.
         token_weights[:, 0] = FIRST_TOKEN_WEIGHT
     denominator = token_weights.sum().clamp_min(1.0)
 
