@@ -21,9 +21,17 @@ import json
 import random
 import shutil
 import statistics
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Mapping, Sequence
+
+# The first evaluation imports project_gui_owl_train from the repository root.
+# Without this the stage loads a 2B teacher and the student, then dies on an
+# ImportError minutes in -- on a paid box, after the expensive part.
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from android_drlqn.gui_owl_student import (
     gate_from_mapping,
