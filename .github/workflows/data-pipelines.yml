@@ -6,14 +6,39 @@ on:
       - android_drlqn/unigui_openmobile.py
       - android_drlqn/ui_mopd.py
       - android_drlqn/qwen_screen_qa.py
+      - android_drlqn/gui_owl_student.py
       - scripts/prepare_unigui_gui_policy.py
       - scripts/generate_qwen_screen_chat.py
       - scripts/train_gui_owl_adapter.py
+      - scripts/prepare_gui_owl_recovery.py
+      - scripts/calibrate_gui_owl_compression.py
+      - scripts/normalize_gui_owl_calibration.py
+      - scripts/build_gui_owl_student.py
+      - scripts/distill_gui_owl_student.py
+      - scripts/distill_gui_owl_policy_aligned.py
+      - scripts/run_gui_owl_progressive_distillation.py
+      - scripts/evaluate_gui_owl_policy_checkpoint.py
+      - scripts/evaluate_gui_owl_policy_teacher.py
+      - scripts/diagnose_gui_owl_first_token.py
+      - scripts/retry_gui_owl_1_5b_policy_alignment.sh
+      - scripts/train_gui_owl_1_5b_full.sh
+      - scripts/train_gui_owl_1b_full.sh
+      - scripts/train_gui_owl_0_5b_full.sh
+      - scripts/package_gui_owl_hf_weights.sh
+      - scripts/export_gui_owl_gguf.sh
+      - scripts/package_gui_owl_students.sh
+      - scripts/pull_gui_owl_students_to_mac.sh
       - tests/test_unigui_openmobile.py
       - tests/test_ui_mopd.py
       - tests/test_qwen_screen_qa.py
       - tests/test_gui_owl_adapter_data.py
+      - tests/test_gui_owl_student.py
+      - tests/test_gui_owl_progressive_pipeline.py
+      - tests/test_gui_owl_policy_alignment_retry.py
+      - tests/test_full_training_scripts.py
+      - tests/test_gguf_export_scripts.py
       - config/gui_owl_dual_lora_data.json
+      - config/gui_owl_students.json
       - pyproject.toml
       - Dockerfile.train
       - compose.yaml
@@ -21,6 +46,8 @@ on:
       - .env.example
       - docs/docker_ubuntu_training.md
       - docs/unigui_qwen_ui_mopd.md
+      - docs/gui_owl_student_distillation.md
+      - docs/gui_owl_gguf_mac_transfer.md
       - .github/workflows/data-pipelines.yml
   workflow_dispatch:
 
@@ -38,15 +65,39 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e '.[test]'
+      - name: Verify root GUI-Owl module packaging
+        run: |
+          (cd /tmp && python -c 'from project_gui_owl_train import parse_gui_owl_output; assert callable(parse_gui_owl_output)')
       - name: Compile data pipeline modules
         run: |
           python -m py_compile \
             android_drlqn/unigui_openmobile.py \
             android_drlqn/ui_mopd.py \
             android_drlqn/qwen_screen_qa.py \
+            android_drlqn/gui_owl_student.py \
             scripts/prepare_unigui_gui_policy.py \
             scripts/generate_qwen_screen_chat.py \
-            scripts/train_gui_owl_adapter.py
+            scripts/train_gui_owl_adapter.py \
+            scripts/prepare_gui_owl_recovery.py \
+            scripts/calibrate_gui_owl_compression.py \
+            scripts/normalize_gui_owl_calibration.py \
+            scripts/build_gui_owl_student.py \
+            scripts/distill_gui_owl_student.py \
+            scripts/distill_gui_owl_policy_aligned.py \
+            scripts/run_gui_owl_progressive_distillation.py \
+            scripts/evaluate_gui_owl_policy_checkpoint.py \
+            scripts/evaluate_gui_owl_policy_teacher.py \
+            scripts/diagnose_gui_owl_first_token.py
+      - name: Validate shell scripts
+        run: |
+          bash -n scripts/retry_gui_owl_1_5b_policy_alignment.sh
+          bash -n scripts/train_gui_owl_1_5b_full.sh
+          bash -n scripts/train_gui_owl_1b_full.sh
+          bash -n scripts/train_gui_owl_0_5b_full.sh
+          bash -n scripts/package_gui_owl_hf_weights.sh
+          bash -n scripts/export_gui_owl_gguf.sh
+          bash -n scripts/package_gui_owl_students.sh
+          bash -n scripts/pull_gui_owl_students_to_mac.sh
       - name: Validate Docker Compose
         run: docker compose config -q
       - name: Run focused tests
@@ -55,4 +106,9 @@ jobs:
             tests/test_unigui_openmobile.py \
             tests/test_ui_mopd.py \
             tests/test_qwen_screen_qa.py \
-            tests/test_gui_owl_adapter_data.py
+            tests/test_gui_owl_adapter_data.py \
+            tests/test_gui_owl_student.py \
+            tests/test_gui_owl_progressive_pipeline.py \
+            tests/test_gui_owl_policy_alignment_retry.py \
+            tests/test_full_training_scripts.py \
+            tests/test_gguf_export_scripts.py

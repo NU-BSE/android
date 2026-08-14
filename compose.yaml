@@ -25,7 +25,7 @@ x-gpu-runtime: &gpu-runtime
       reservations:
         devices:
           - driver: nvidia
-            count: all
+            count: 1
             capabilities: [gpu]
 
 services:
@@ -114,6 +114,88 @@ services:
       - cuda
       - --output
       - artifacts/adapters/chat
+
+  prepare-recovery:
+    <<: *runtime
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+      HUGGING_FACE_HUB_TOKEN: ${HF_TOKEN:-}
+      RECOVERY_RECORDS: ${RECOVERY_RECORDS:-50000}
+      RECOVERY_MIN_RECORDS: ${RECOVERY_MIN_RECORDS:-10000}
+    command:
+      - python
+      - scripts/prepare_gui_owl_recovery.py
+      - --max-records
+      - "${RECOVERY_RECORDS:-50000}"
+      - --min-records
+      - "${RECOVERY_MIN_RECORDS:-10000}"
+
+  calibrate-student:
+    <<: *gpu-runtime
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+      HUGGING_FACE_HUB_TOKEN: ${HF_TOKEN:-}
+      CALIBRATION_RECORDS: ${CALIBRATION_RECORDS:-64}
+    command:
+      - python
+      - scripts/calibrate_gui_owl_compression.py
+      - --device
+      - cuda
+      - --max-records-per-corpus
+      - "${CALIBRATION_RECORDS:-64}"
+
+  progressive-student:
+    <<: *gpu-runtime
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+      HUGGING_FACE_HUB_TOKEN: ${HF_TOKEN:-}
+      STUDENT_SIZE: ${STUDENT_SIZE:-1.5b}
+      DISTILL_MAX_RECORDS: ${DISTILL_MAX_RECORDS:-}
+      DISTILL_MAX_UPDATES: ${DISTILL_MAX_UPDATES:-}
+      DISTILL_INTERMEDIATE_UPDATES: ${DISTILL_INTERMEDIATE_UPDATES:-750}
+      DISTILL_RESUME: ${DISTILL_RESUME:-0}
+    command:
+      - bash
+      - -lc
+      - |
+        set -euo pipefail
+        args=(
+          --student "$${STUDENT_SIZE}"
+          --device cuda
+          --intermediate-recovery-updates "$${DISTILL_INTERMEDIATE_UPDATES}"
+        )
+        if [[ -n "$${DISTILL_MAX_RECORDS}" ]]; then
+          args+=(--max-records-per-corpus "$${DISTILL_MAX_RECORDS}")
+        fi
+        if [[ -n "$${DISTILL_MAX_UPDATES}" ]]; then
+          args+=(--max-updates "$${DISTILL_MAX_UPDATES}")
+        fi
+        if [[ "$${DISTILL_RESUME}" == "1" ]]; then
+          args+=(--resume)
+        fi
+        python scripts/run_gui_owl_progressive_distillation.py "$${args[@]}"
+
+  progressive-student-smoke:
+    <<: *gpu-runtime
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+      HUGGING_FACE_HUB_TOKEN: ${HF_TOKEN:-}
+      STUDENT_SIZE: ${STUDENT_SIZE:-1.5b}
+      DISTILL_MAX_RECORDS: ${DISTILL_MAX_RECORDS:-16}
+      DISTILL_MAX_UPDATES: ${DISTILL_MAX_UPDATES:-2}
+    command:
+      - python
+      - scripts/run_gui_owl_progressive_distillation.py
+      - --student
+      - "${STUDENT_SIZE:-1.5b}"
+      - --device
+      - cuda
+      - --max-records-per-corpus
+      - "${DISTILL_MAX_RECORDS:-16}"
+      - --max-updates
+      - "${DISTILL_MAX_UPDATES:-2}"
+      - --intermediate-recovery-updates
+      - "2"
 
 volumes:
   hf-cache:

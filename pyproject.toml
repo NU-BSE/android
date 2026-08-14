@@ -12,7 +12,10 @@ dependencies = ["numpy>=1.24"]
 [project.optional-dependencies]
 test = ["pytest>=8.0"]
 ollama = ["pillow>=10.0"]
-data = ["huggingface-hub>=0.34"]
+data = [
+  "huggingface-hub>=0.34",
+  "datasets>=3.0"
+]
 train = [
   "torch>=2.4",
   "torchvision>=0.19",
@@ -21,6 +24,9 @@ train = [
   "safetensors>=0.4",
   "pillow>=10.0"
 ]
+
+[tool.setuptools]
+py-modules = ["project_gui_owl_train"]
 
 [tool.setuptools.packages.find]
 include = ["android_drlqn*"]

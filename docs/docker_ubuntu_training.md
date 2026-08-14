@@ -1,16 +1,10 @@
 # Ubuntu Docker Compose training
 
-This repository includes a CUDA training image and Docker Compose services for
-preparing Uni-GUI-OpenMobile data, generating Qwen screen chat data, and training
-the two GUI-Owl LoRA adapters on an Ubuntu host.
+This repository includes a CUDA image and Docker Compose services for Uni-GUI data preparation, Qwen screen-chat generation, the two GUI-Owl LoRA adapters, and the calibrated compact-student pipeline.
 
 ## Host requirements
 
-Use an Ubuntu machine with Docker Engine, the Docker Compose v2 plugin, an NVIDIA
-driver, and NVIDIA Container Toolkit configured for Docker. The container uses
-CUDA; the host does not need a separate Python, PyTorch, or torchvision install.
-
-Check the host first:
+Use Ubuntu with Docker Engine, Docker Compose v2, an NVIDIA driver, and NVIDIA Container Toolkit configured for Docker. Verify the host with:
 
 ```bash
 nvidia-smi
@@ -18,36 +12,34 @@ docker --version
 docker compose version
 ```
 
-After NVIDIA Container Toolkit is configured, Docker must be able to expose the
-GPU to containers. The Compose `train-*` and `gpu-shell` services request all
-NVIDIA GPUs through a device reservation.
+GPU services reserve **one** NVIDIA GPU. The current trainers are single-device, so reserving every visible GPU would waste capacity on a multi-GPU host.
 
-## Configure environment
-
-From the repository root:
+## Environment
 
 ```bash
 cp .env.example .env
 ```
 
-Set these values as needed:
+Relevant values are:
 
 ```dotenv
-# Optional for public Hugging Face downloads, recommended for rate limits.
 HF_TOKEN=
-
-# Required only by the Qwen chat-generation step.
 DASHSCOPE_API_KEY=
 DASHSCOPE_BASE_URL=https://dashscope-intl.aliyuncs.com/compatible-mode/v1
-
-# Strongly recommended: immutable Uni-GUI-OpenMobile dataset commit.
 UNIGUI_REVISION=
 UNIGUI_APP=settings
-
 SMOKE_RECORDS=8
+RECOVERY_RECORDS=50000
+RECOVERY_MIN_RECORDS=10000
+STUDENT_SIZE=1.5b
+CALIBRATION_RECORDS=64
+DISTILL_MAX_RECORDS=
+DISTILL_MAX_UPDATES=
+DISTILL_INTERMEDIATE_UPDATES=750
+DISTILL_RESUME=0
 ```
 
-Do not commit `.env`; it is excluded from the Docker build context.
+Do not commit `.env`.
 
 ## Build and verify CUDA
 
@@ -65,125 +57,139 @@ if torch.cuda.is_available():
 PY
 ```
 
-The default image is `pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime`. The
-Dockerfile keeps the image's CUDA-enabled Torch 2.5.1 and installs the matching
-`torchvision==0.20.1` explicitly, avoiding the macOS-style missing torchvision
-failure and avoiding an accidental CPU-only torch replacement during pip
-resolution.
+The default image is `pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime`. It retains the CUDA Torch supplied by that image, pins `torchvision==0.20.1`, and installs Hugging Face `datasets` for recovery-corpus preparation.
 
-A different official PyTorch image can be supplied at build time:
-
-```bash
-docker compose build \
-  --build-arg PYTORCH_IMAGE=pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
-```
-
-When changing the Torch version, update the torchvision pin in
-`Dockerfile.train` to the matching release.
-
-## Prepare Uni-GUI-OpenMobile
-
-The preparation service does not require a GPU. It writes its output into the
-host `./artifacts` directory through the repository bind mount.
+## Prepare specialized data
 
 ```bash
 docker compose run --rm prepare-unigui
-```
-
-Expected output:
-
-```text
-artifacts/training/gui-policy-unigui-openmobile.jsonl
-artifacts/training/gui-policy-unigui-openmobile.jsonl.manifest.json
-```
-
-For reproducible training, set `UNIGUI_REVISION` to an immutable dataset commit
-before this step.
-
-## Generate Qwen chat data
-
-With `DASHSCOPE_API_KEY` configured:
-
-```bash
 docker compose run --rm generate-chat
 ```
 
-This produces:
+Outputs:
 
 ```text
+artifacts/training/gui-policy-unigui-openmobile.jsonl
 artifacts/training/chat-screen-qa-qwen.jsonl
 ```
 
-The Qwen API key is passed as an environment variable and is not written to the
-training records.
+`generate-chat` requires `DASHSCOPE_API_KEY`; the API key remains an environment variable and is not written to the generated records.
 
-## Smoke-test GUI-policy training
+## Train the 2B teacher adapters
 
-Run a small CUDA training pass before launching the complete adapter job:
+Run a bounded GUI-policy smoke job first:
 
 ```bash
 docker compose run --rm train-gui-smoke
 ```
 
-Change the sample count in `.env` with `SMOKE_RECORDS`, for example:
-
-```dotenv
-SMOKE_RECORDS=16
-```
-
-The smoke adapter is written to:
-
-```text
-artifacts/adapters/gui_policy-smoke
-```
-
-## Train the adapters
-
-GUI policy:
+Then train both adapters:
 
 ```bash
 docker compose run --rm train-gui
-```
-
-Chat:
-
-```bash
 docker compose run --rm train-chat
 ```
 
-Outputs remain on the Ubuntu host:
+Outputs:
 
 ```text
 artifacts/adapters/gui_policy
 artifacts/adapters/chat
 ```
 
-Hugging Face and Torch caches use named Docker volumes (`hf-cache` and
-`torch-cache`) so rebuilding/rerunning containers does not redownload every
-model artifact.
+## Prepare broad recovery data
 
-## Interactive debugging
+The v2 compact-student pipeline does not attempt structural recovery from only the Android Settings specialization corpus. Prepare the configured broad instruction corpus first:
 
-CPU/no-GPU shell:
+```bash
+docker compose run --rm prepare-recovery
+```
+
+Outputs:
+
+```text
+artifacts/training/gui-owl-recovery.jsonl
+artifacts/training/gui-owl-recovery.jsonl.manifest.json
+```
+
+The progressive runner refuses to begin recovery when the required corpus is absent.
+
+## Calibrate pruning
+
+```bash
+docker compose run --rm calibrate-student
+```
+
+This writes:
+
+```text
+artifacts/calibration/gui-owl-compression.json
+```
+
+The progressive runner normalizes the calibration before building students so grouped-query attention head groups and the three Qwen3-VL deepstack vision taps stay aligned during 0.5B pruning.
+
+## Progressive compact students
+
+Establish 1.5B first:
+
+```bash
+STUDENT_SIZE=1.5b docker compose run --rm progressive-student
+```
+
+Only after that checkpoint passes its generation gate, run:
+
+```bash
+STUDENT_SIZE=1b docker compose run --rm progressive-student
+STUDENT_SIZE=0.5b docker compose run --rm progressive-student
+```
+
+Compression order:
+
+```text
+2B/28 -> 24 -> recover -> 20 -> recover -> 16 -> recover ~= 1.5B
+1.5B/16 -> 12 -> recover -> 9 -> recover -> 6 -> recover ~= 1B
+1.5B/16 -> structured text/vision width prune -> recover ~= 0.5B
+```
+
+Each recovered student then receives student-sampled K3 reverse-KL and final low-learning-rate GUI/chat specialization. Failed free-generation gates stop the cascade.
+
+A plumbing-only smoke run is available with:
+
+```bash
+STUDENT_SIZE=1.5b \
+DISTILL_MAX_RECORDS=16 \
+DISTILL_MAX_UPDATES=2 \
+  docker compose run --rm progressive-student-smoke
+```
+
+A two-update smoke run is not a quality run; it is intended to expose loading, tensor-shape, processor, and CUDA problems cheaply.
+
+Accepted v2 outputs are written separately from the old collapsed checkpoints:
+
+```text
+artifacts/students/v2/gui-owl-1.5b-distilled
+artifacts/students/v2/gui-owl-1b-distilled
+artifacts/students/v2/gui-owl-0.5b-distilled
+```
+
+Do not GGUF-export a checkpoint unless `distillation-manifest.json` contains `"accepted": true`; the export script enforces that by default.
+
+## Caches and debugging
+
+Hugging Face and Torch caches use the `hf-cache` and `torch-cache` named volumes. Repository artifacts remain under host `./artifacts` through the bind mount.
 
 ```bash
 docker compose run --rm shell
-```
-
-CUDA shell:
-
-```bash
 docker compose run --rm gpu-shell
 ```
 
-Inside the CUDA shell, useful checks are:
+Useful checks inside the GPU shell:
 
 ```bash
 nvidia-smi
 python -c 'import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))'
 wc -l artifacts/training/gui-policy-unigui-openmobile.jsonl
+wc -l artifacts/training/gui-owl-recovery.jsonl
 ```
 
-The LoRA trainer still accepts `--device cpu`, but training a 2B vision-language
-model on CPU is intended only for debugging and is generally impractical for a
-full run.
+The LoRA trainer can still run with `--device cpu` for debugging, but full VLM training on CPU is impractical.
