@@ -21,9 +21,17 @@ import json
 import random
 import shutil
 import statistics
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Mapping, Sequence
+
+# The first evaluation imports project_gui_owl_train from the repository root.
+# Without this the stage loads a 2B teacher and the student, then dies on an
+# ImportError minutes in -- on a paid box, after the expensive part.
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from android_drlqn.gui_owl_student import (
     gate_from_mapping,
@@ -715,7 +723,13 @@ def _evaluate_generation(
         "median_generated_tokens": float(statistics.median(lengths)),
         "mean_supervised_ce": sum(ce_values) / len(ce_values),
         "mean_teacher_kl": sum(kl_values) / len(kl_values),
-        "gui_parse_rate": gui_valid / gui_total if gui_total else 1.0,
+        # Stage A holds out broad recovery data only, so gui_total is 0 there.
+        # Reporting an unmeasured parse rate as 1.0 made a GUI-collapsed
+        # checkpoint look accepted in checkpoint-metrics.json; gui_records is
+        # what tells the two apart, and the gate refuses to read the rate
+        # without it.
+        "gui_records": float(gui_total),
+        "gui_parse_rate": gui_valid / gui_total if gui_total else 0.0,
     }
 
 

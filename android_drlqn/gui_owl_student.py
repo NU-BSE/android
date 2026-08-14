@@ -193,12 +193,25 @@ def _score_sequence(scores: Mapping[object, object] | Sequence[object]) -> dict[
     return parsed
 
 
+TEXT_TAIL_PROTECTED_LAYERS = 6
+"""Final text blocks retained regardless of saliency.
+
+Activation-energy saliency ranks the last blocks before the output layer low
+(0.16-0.22 against 0.28-0.42 for the middle of the stack), so the unconstrained
+selection drops them first.  Removing them collapses the next-token
+distribution onto `<|im_end|>` at exactly the position a structured tool call
+must open: a depth-16 text stack built without this protection scores 0.99
+top-1 mass and 0.09 entropy there, against 0.14 and 5.79 with it.
+"""
+
+
 def select_salient_layer_ids(
     scores: Mapping[object, object] | Sequence[object],
     source_layer_ids: Sequence[int],
     target_layers: int,
     *,
     protect_boundaries: bool = True,
+    protect_tail: int = 0,
 ) -> tuple[int, ...]:
     """Choose a nested subset of original layer IDs by calibration saliency.
 
@@ -222,11 +235,20 @@ def select_salient_layer_ids(
     if missing:
         raise ValueError(f"missing saliency scores for layers: {missing}")
 
+    if protect_tail < 0:
+        raise ValueError("protect_tail must not be negative")
+
     keep: set[int] = set()
     if protect_boundaries:
         keep.add(source[0])
         if target_layers > 1:
             keep.add(source[-1])
+    # Nearest the output first, so a target depth too small to hold the whole
+    # protected tail still keeps the blocks closest to the head.
+    for layer_id in reversed(source[len(source) - protect_tail :] if protect_tail else ()):
+        if len(keep) >= target_layers:
+            break
+        keep.add(layer_id)
     ranked = sorted(source, key=lambda layer_id: (-score_by_id[layer_id], layer_id))
     for layer_id in ranked:
         if len(keep) >= target_layers:
@@ -461,9 +483,18 @@ def generation_gate_failures(
                 f"mean_supervised_ce={value:.4f} > {gate.mean_supervised_ce_max:.4f}"
             )
     if gate.gui_parse_rate_min is not None:
-        value = number("gui_parse_rate")
-        if value < gate.gui_parse_rate_min:
-            failures.append(f"gui_parse_rate={value:.4f} < {gate.gui_parse_rate_min:.4f}")
+        # A stage that gates on GUI syntax but evaluated no GUI record has not
+        # passed anything: fail loudly instead of accepting an unmeasured rate.
+        measured = metrics.get("gui_records")
+        if measured is not None and float(measured) <= 0:
+            failures.append(
+                "gui_parse_rate is unmeasured: the evaluation holdout contains "
+                "no gui_policy records"
+            )
+        else:
+            value = number("gui_parse_rate")
+            if value < gate.gui_parse_rate_min:
+                failures.append(f"gui_parse_rate={value:.4f} < {gate.gui_parse_rate_min:.4f}")
     return tuple(failures)
 
 

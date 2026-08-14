@@ -145,6 +145,65 @@ def test_generation_gate_catches_eos_collapse_even_with_good_ce():
     assert not any("mean_supervised_ce" in value for value in failures)
 
 
+def test_tail_protection_keeps_the_final_blocks_saliency_would_drop():
+    # Mirrors the real manifest: the last blocks score lowest, so an
+    # unconstrained selection drops them and collapses the output distribution
+    # onto <|im_end|> at the position a tool call must open.
+    scores = [10.0, 0.9, 0.8, 0.7, 0.6, 0.5] + [0.1, 0.1, 0.1, 0.1]
+    source = tuple(range(10))
+
+    unprotected = select_salient_layer_ids(scores, source, 6)
+    assert unprotected == (0, 1, 2, 3, 4, 9)
+
+    protected = select_salient_layer_ids(scores, source, 6, protect_tail=4)
+    assert protected == (0, 1, 6, 7, 8, 9)
+
+
+def test_tail_protection_prefers_blocks_nearest_the_output_when_depth_is_tight():
+    scores = [10.0] + [0.1] * 9
+    source = tuple(range(10))
+    # Three slots cannot hold a four-layer tail; the ones nearest the head win.
+    assert select_salient_layer_ids(scores, source, 3, protect_tail=4) == (0, 8, 9)
+    with pytest.raises(ValueError, match="protect_tail"):
+        select_salient_layer_ids(scores, source, 3, protect_tail=-1)
+
+
+def test_tail_protected_selections_stay_nested_across_the_depth_schedule():
+    scores = [10.0] + [1.0 / (index + 1) for index in range(1, 27)] + [5.0]
+    selected = tuple(range(28))
+    previous = set(selected)
+    for depth in (24, 20, 16, 12, 9, 6):
+        selected = select_salient_layer_ids(scores, selected, depth, protect_tail=6)
+        assert len(selected) == depth
+        # Each stage must initialize exactly from the previous checkpoint.
+        assert set(selected).issubset(previous)
+        previous = set(selected)
+
+
+def test_gui_parse_gate_rejects_an_unmeasured_parse_rate():
+    gate = GenerationGate(
+        first_token_eos_rate_max=0.05,
+        empty_generation_rate_max=0.05,
+        median_generated_tokens_min=8,
+        gui_parse_rate_min=0.5,
+    )
+    healthy = {
+        "first_token_eos_rate": 0.0,
+        "empty_generation_rate": 0.0,
+        "median_generated_tokens": 64,
+        "mean_teacher_kl": 2.49,
+        "mean_supervised_ce": 2.31,
+    }
+    # No GUI record reached the evaluator, so the rate carries no evidence.
+    failures = generation_gate_failures({**healthy, "gui_records": 0.0, "gui_parse_rate": 0.0}, gate)
+    assert any("unmeasured" in value for value in failures)
+
+    measured = generation_gate_failures(
+        {**healthy, "gui_records": 8.0, "gui_parse_rate": 0.75}, gate
+    )
+    assert not measured
+
+
 def test_parameter_error_and_invalid_teacher_config():
     assert relative_parameter_error(1_050_000_000, 1_000_000_000) == pytest.approx(0.05)
     with pytest.raises(ValueError, match="qwen3_vl"):

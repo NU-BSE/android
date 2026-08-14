@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 from android_drlqn.gui_owl_student import (
+    TEXT_TAIL_PROTECTED_LAYERS,
     build_student_config_dict,
     expand_head_indices,
     expand_spatial_merge_indices,
@@ -117,7 +118,9 @@ def _select_text_layers(
             if len(selected) == target_depth and set(selected).issubset(set(source_ids)):
                 return selected
     scores = _calibration_scores(calibration, "text", "layer_scores")
-    return select_salient_layer_ids(scores, source_ids, target_depth)
+    return select_salient_layer_ids(
+        scores, source_ids, target_depth, protect_tail=TEXT_TAIL_PROTECTED_LAYERS
+    )
 
 
 def _select_vision_layers(
