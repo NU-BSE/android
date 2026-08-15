@@ -11,11 +11,36 @@ from scripts.normalize_gui_owl_calibration import (
     grouped_query_kv_selection,
 )
 from scripts.prepare_gui_owl_recovery import DEFAULT_REVISION, _clean_messages
-from scripts.run_gui_owl_progressive_distillation import _accepted
+from scripts.run_gui_owl_progressive_distillation import (
+    POLICY_TRAINER,
+    RECOVERY_TRAINER,
+    _accepted,
+)
 
 
 def _plan() -> dict[str, object]:
     return load_student_plan("config/gui_owl_students.json")
+
+
+def test_policy_stages_run_through_the_repair_entrypoint():
+    # The base K3 term clamps the delta with plain torch.clamp, whose gradient
+    # is 0 outside the interval, so the GUI tokens furthest from the teacher --
+    # the ones on_policy exists to correct -- got no gradient. The repair lives
+    # in the policy-aligned entrypoint, which the runner must therefore use for
+    # the policy stages while recovery stays on the base trainer.
+    assert POLICY_TRAINER == "scripts/distill_gui_owl_policy_aligned.py"
+    assert RECOVERY_TRAINER == "scripts/distill_gui_owl_student.py"
+
+    source = Path("scripts/run_gui_owl_progressive_distillation.py").read_text(encoding="utf-8")
+    for stage in ('"on_policy"', '"specialize"'):
+        head = source.split(stage)[0]
+        assert head.rstrip().endswith('"--stage",'), stage
+        invocation = head.rsplit("POLICY_TRAINER", 1)
+        assert len(invocation) == 2, f"{stage} must be launched with POLICY_TRAINER"
+        assert "RECOVERY_TRAINER" not in invocation[1], stage
+    # Only the constant may name a trainer path; every launch goes through it.
+    assert source.count('"scripts/distill_gui_owl_student.py"') == 1
+    assert source.count('"scripts/distill_gui_owl_policy_aligned.py"') == 1
 
 
 def test_plan_replaces_one_epoch_distillation_with_update_stages():

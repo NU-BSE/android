@@ -26,6 +26,16 @@ else:
     from normalize_gui_owl_calibration import normalize_manifest
 
 
+RECOVERY_TRAINER = "scripts/distill_gui_owl_student.py"
+# The policy stages run through the repair entrypoint. It replaces the base
+# K3 term -- whose plain torch.clamp has derivative 0 outside the delta clip,
+# so the tokens furthest from the teacher, which is exactly the GUI grammar,
+# received no gradient at all -- and adds the first-token/prefix teacher
+# forcing weights. Recovery stays on the base trainer: its k3_weight is 0, and
+# it is broad-corpus KD that should not be first-token weighted.
+POLICY_TRAINER = "scripts/distill_gui_owl_policy_aligned.py"
+
+
 def _student_entry(plan: Mapping[str, object], name: str) -> dict[str, object]:
     students = plan.get("students")
     if not isinstance(students, Mapping) or not isinstance(students.get(name), Mapping):
@@ -171,7 +181,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
 
                 recover_command = [
                     sys.executable,
-                    "scripts/distill_gui_owl_student.py",
+                    RECOVERY_TRAINER,
                     "--student",
                     args.student,
                     "--stage",
@@ -224,7 +234,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             _run(build_command, dry_run=args.dry_run)
             recover_command = [
                 sys.executable,
-                "scripts/distill_gui_owl_student.py",
+                RECOVERY_TRAINER,
                 "--student",
                 args.student,
                 "--stage",
@@ -254,7 +264,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         if not (args.resume and _accepted(on_policy_dir)):
             command = [
                 sys.executable,
-                "scripts/distill_gui_owl_student.py",
+                POLICY_TRAINER,
                 "--student",
                 args.student,
                 "--stage",
@@ -289,7 +299,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         if not (args.resume and _accepted(final)):
             command = [
                 sys.executable,
-                "scripts/distill_gui_owl_student.py",
+                POLICY_TRAINER,
                 "--student",
                 args.student,
                 "--stage",
