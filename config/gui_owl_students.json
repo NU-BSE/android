@@ -33,7 +33,7 @@
   "progressive": {
     "1.5b": {
       "source": "mPLUG/GUI-Owl-1.5-2B-Instruct",
-      "text_depth_schedule": [24, 20, 16]
+      "text_depth_schedule": [24, 20]
     },
     "1b": {
       "source": "artifacts/students/v2/gui-owl-1.5b-distilled",
@@ -135,7 +135,7 @@
   "students": {
     "1.5b": {
       "target_parameters": 1500000000,
-      "text_layers": 16,
+      "text_layers": 20,
       "text_hidden_size": 2048,
       "text_intermediate_size": 6144,
       "text_attention_heads": 16,
@@ -146,6 +146,7 @@
       "vision_heads": 16,
       "deepstack_visual_indexes": [5, 11, 17],
       "freeze_vision_during_kd": true,
+      "recovery_include_specialized": true,
       "max_relative_parameter_error": 0.15,
       "initialized": "artifacts/students/v2/gui-owl-1.5b-init",
       "distilled": "artifacts/students/v2/gui-owl-1.5b-distilled"
@@ -163,6 +164,7 @@
       "vision_heads": 16,
       "deepstack_visual_indexes": [5, 11, 17],
       "freeze_vision_during_kd": true,
+      "recovery_include_specialized": true,
       "max_relative_parameter_error": 0.15,
       "initialized": "artifacts/students/v2/gui-owl-1b-init",
       "distilled": "artifacts/students/v2/gui-owl-1b-distilled"
