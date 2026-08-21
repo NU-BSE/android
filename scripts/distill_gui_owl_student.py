@@ -166,11 +166,12 @@ def _stage_sources(
     if stage == "specialize":
         return specialized
     recovery = _recovery_sources(plan)
-    # Stage A recovers general representations, so it defaults to the broad
-    # corpus alone. Mixing the GUI/chat sets in here is what the v1 recipe did:
-    # the student fitted a narrow distribution before it could form language at
-    # all, reaching a plausible teacher-forced CE while free-running generation
-    # collapsed. Specialization belongs in stage C, after generative recovery.
+    # Structural recovery still needs the broad corpus, but the trainable text
+    # stack operates almost entirely under image-token context at inference.
+    # A broad-only text mix therefore trains the part we are trying to recover
+    # away from its deployment regime.  Per-student overrides allow the current
+    # GUI/chat corpora to provide multimodal context until a broad multimodal
+    # recovery corpus is available.
     include_specialized = bool(
         student_entry.get("recovery_include_specialized")
         if student_entry.get("recovery_include_specialized") is not None
@@ -178,15 +179,16 @@ def _stage_sources(
     )
     if include_specialized:
         recovery.extend(specialized)
-    elif vision_trainable and all(source.text_only for source in recovery):
-        # A width-pruned student trains its vision tower, and the broad recovery
-        # corpus is text-only: with no image in any record the tower is never
-        # executed, so its pruned weights would receive no gradient for the whole
-        # of stage A. Refuse rather than silently skip recovering it.
+
+    if stage == "recovery" and all(source.text_only for source in recovery):
+        if vision_trainable:
+            detail = "the trainable text and vision stacks"
+        else:
+            detail = "the trainable text stack"
         raise ValueError(
-            "vision is trainable for this student but every recovery corpus is "
-            "text_only; set include_specialized=true for this stage or add a "
-            "multimodal recovery corpus"
+            f"recovery would train {detail} on a 100% text_only mix; include at "
+            "least one multimodal corpus by setting recovery_include_specialized=true "
+            "for this student or by adding a broad multimodal recovery corpus"
         )
     return recovery
 
@@ -758,11 +760,9 @@ def _evaluate_generation(
         "median_generated_tokens": float(statistics.median(lengths)),
         "mean_supervised_ce": sum(ce_values) / len(ce_values),
         "mean_teacher_kl": sum(kl_values) / len(kl_values),
-        # Stage A holds out broad recovery data only, so gui_total is 0 there.
-        # Reporting an unmeasured parse rate as 1.0 made a GUI-collapsed
-        # checkpoint look accepted in checkpoint-metrics.json; gui_records is
-        # what tells the two apart, and the gate refuses to read the rate
-        # without it.
+        # GUI coverage depends on the selected stage mix. gui_records makes an
+        # unmeasured parse rate explicit, and the gate refuses to treat zero
+        # measured GUI records as success.
         "gui_records": float(gui_total),
         "gui_parse_rate": gui_valid / gui_total if gui_total else 0.0,
     }
