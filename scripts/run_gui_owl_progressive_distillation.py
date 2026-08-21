@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 from typing import Mapping, Sequence
 
-from android_drlqn.gui_owl_student import load_student_plan
+from android_drlqn.gui_owl_student import TEXT_TAIL_PROTECTED_LAYERS, load_student_plan
 
 # Support both documented direct execution (`python scripts/...py`) and package
 # imports used by tests (`from scripts.run_... import ...`). When a file inside
@@ -50,12 +50,59 @@ def _progressive_entry(plan: Mapping[str, object], name: str) -> dict[str, objec
     return dict(value[name])
 
 
-def _accepted(path: Path, *, require_gui_recovery: bool = False) -> bool:
+def _tail_protected_lineage(path: Path) -> bool:
+    """Return whether a checkpoint's stored structural build kept the protected tail."""
+
+    lineage: Mapping[str, object] | None = None
+    for name in ("compression-lineage.json", "student-build-manifest.json"):
+        candidate = path / name
+        if not candidate.is_file():
+            continue
+        value = json.loads(candidate.read_text(encoding="utf-8"))
+        if isinstance(value, Mapping):
+            lineage = value
+            break
+    if lineage is None:
+        return False
+
+    try:
+        source = tuple(int(value) for value in lineage.get("source_text_original_layer_ids") or ())
+        selected = tuple(int(value) for value in lineage.get("text_original_layer_ids") or ())
+    except (TypeError, ValueError):
+        return False
+    if not source or not selected or len(selected) > len(source):
+        return False
+    if len(set(source)) != len(source) or len(set(selected)) != len(selected):
+        return False
+    if tuple(sorted(source)) != source or tuple(sorted(selected)) != selected:
+        return False
+    if not set(selected).issubset(set(source)):
+        return False
+
+    required: set[int] = {source[0]}
+    if len(selected) > 1:
+        required.add(source[-1])
+    tail = source[len(source) - TEXT_TAIL_PROTECTED_LAYERS :]
+    for layer_id in reversed(tail):
+        if len(required) >= len(selected):
+            break
+        required.add(layer_id)
+    return required.issubset(set(selected))
+
+
+def _accepted(
+    path: Path,
+    *,
+    require_gui_recovery: bool = False,
+    require_tail_protected_lineage: bool = False,
+) -> bool:
     manifest = path / "distillation-manifest.json"
     if not manifest.is_file():
         return False
     value = json.loads(manifest.read_text(encoding="utf-8"))
     if not isinstance(value, Mapping) or not bool(value.get("accepted")):
+        return False
+    if require_tail_protected_lineage and not _tail_protected_lineage(path):
         return False
     if not require_gui_recovery:
         return True
@@ -175,13 +222,19 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     stages: list[dict[str, object]] = []
 
     if schedule:
+        upstream_rebuilt = False
         for index, depth in enumerate(schedule):
             init_dir = work_root / f"depth-{depth}-init"
             recovered_dir = work_root / f"depth-{depth}-recovered"
             is_final_depth = index == len(schedule) - 1
-            resume_ok = args.resume and _accepted(
-                recovered_dir,
-                require_gui_recovery=is_final_depth,
+            resume_ok = (
+                args.resume
+                and not upstream_rebuilt
+                and _accepted(
+                    recovered_dir,
+                    require_gui_recovery=is_final_depth,
+                    require_tail_protected_lineage=True,
+                )
             )
             if not resume_ok:
                 build_command = [
@@ -230,6 +283,9 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                         str(args.intermediate_recovery_updates),
                     ]
                 _run(recover_command, dry_run=args.dry_run)
+                # A downstream structural checkpoint was initialized from the old
+                # predecessor, so it is not resume-compatible after this rebuild.
+                upstream_rebuilt = True
             current_source = str(recovered_dir)
             stages.append({"depth": depth, "checkpoint": str(recovered_dir)})
     else:
@@ -241,7 +297,11 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         recovered_dir = work_root / "width-recovered"
         if not (
             args.resume
-            and _accepted(recovered_dir, require_gui_recovery=True)
+            and _accepted(
+                recovered_dir,
+                require_gui_recovery=True,
+                require_tail_protected_lineage=True,
+            )
         ):
             build_command = [
                 sys.executable,
