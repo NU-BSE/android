@@ -158,6 +158,29 @@ def test_resume_only_accepts_generation_gated_checkpoint(tmp_path: Path):
     assert _accepted(checkpoint) is True
 
 
+def test_final_recovery_resume_requires_gui_evidence(tmp_path: Path):
+    """Do not let --resume skip the repaired 24 -> 20 recovery with a legacy manifest."""
+
+    checkpoint = tmp_path / "depth-20-recovered"
+    checkpoint.mkdir()
+    manifest = checkpoint / "distillation-manifest.json"
+    legacy = {
+        "accepted": True,
+        "stage": "recovery",
+        "final_evaluation": {"gui_records": 0.0},
+    }
+    manifest.write_text(json.dumps(legacy), encoding="utf-8")
+    assert _accepted(checkpoint) is True
+    assert _accepted(checkpoint, require_gui_recovery=True) is False
+
+    repaired = {
+        **legacy,
+        "final_evaluation": {"gui_records": 8.0, "gui_parse_rate": 0.75},
+    }
+    manifest.write_text(json.dumps(repaired), encoding="utf-8")
+    assert _accepted(checkpoint, require_gui_recovery=True) is True
+
+
 def test_k3_delta_clip_bounds_the_exponential_loss_term():
     """K3 is exp(delta) - delta - 1, so the clip bounds the loss exponentially.
 
