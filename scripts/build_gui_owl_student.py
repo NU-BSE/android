@@ -105,18 +105,45 @@ def _recommended(calibration: Mapping[str, object], key: str) -> object:
     return value[key]
 
 
+def _protected_text_layer_ids(
+    source_ids: Sequence[int], target_depth: int
+) -> set[int]:
+    """Return the boundary/tail IDs a recommended manifest may not remove."""
+
+    source = tuple(int(value) for value in source_ids)
+    if not source or not 1 <= target_depth <= len(source):
+        raise ValueError("target text depth must fit inside a non-empty source")
+    keep: set[int] = {source[0]}
+    if target_depth > 1:
+        keep.add(source[-1])
+    tail = source[len(source) - TEXT_TAIL_PROTECTED_LAYERS :]
+    for layer_id in reversed(tail):
+        if len(keep) >= target_depth:
+            break
+        keep.add(layer_id)
+    return keep
+
+
 def _select_text_layers(
     calibration: Mapping[str, object], source_ids: Sequence[int], target_depth: int
 ) -> tuple[int, ...]:
     if target_depth == len(source_ids):
         return tuple(int(value) for value in source_ids)
+    required = _protected_text_layer_ids(source_ids, target_depth)
     recommended = _recommended(calibration, "text_layers_by_depth")
     if isinstance(recommended, Mapping):
         candidate = recommended.get(str(target_depth))
         if isinstance(candidate, Sequence) and not isinstance(candidate, (str, bytes)):
             selected = tuple(int(value) for value in candidate)
-            if len(selected) == target_depth and set(selected).issubset(set(source_ids)):
+            if (
+                len(selected) == target_depth
+                and set(selected).issubset(set(source_ids))
+                and required.issubset(set(selected))
+            ):
                 return selected
+    # Old calibration manifests may predate tail protection. Never let an
+    # otherwise-valid recommended map bypass the live safety contract: rebuild
+    # a nested selection from the recorded scores instead.
     scores = _calibration_scores(calibration, "text", "layer_scores")
     return select_salient_layer_ids(
         scores, source_ids, target_depth, protect_tail=TEXT_TAIL_PROTECTED_LAYERS
