@@ -164,7 +164,6 @@
       "vision_heads": 16,
       "deepstack_visual_indexes": [5, 11, 17],
       "freeze_vision_during_kd": true,
-      "recovery_include_specialized": true,
       "max_relative_parameter_error": 0.15,
       "initialized": "artifacts/students/v2/gui-owl-1b-init",
       "distilled": "artifacts/students/v2/gui-owl-1b-distilled"
