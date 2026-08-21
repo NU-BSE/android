@@ -50,12 +50,30 @@ def _progressive_entry(plan: Mapping[str, object], name: str) -> dict[str, objec
     return dict(value[name])
 
 
-def _accepted(path: Path) -> bool:
+def _accepted(path: Path, *, require_gui_recovery: bool = False) -> bool:
     manifest = path / "distillation-manifest.json"
     if not manifest.is_file():
         return False
     value = json.loads(manifest.read_text(encoding="utf-8"))
-    return isinstance(value, Mapping) and bool(value.get("accepted"))
+    if not isinstance(value, Mapping) or not bool(value.get("accepted")):
+        return False
+    if not require_gui_recovery:
+        return True
+
+    # Legacy structural recovery could be accepted after evaluating only the
+    # broad text corpus. The corrected recovery mix always contributes held-out
+    # gui_policy records, and evaluation reserves a GUI quota. Require evidence
+    # of that regime before reusing the final structural checkpoint; otherwise
+    # --resume would silently skip the very 24 -> 20 recovery being repaired.
+    if str(value.get("stage") or "") != "recovery":
+        return False
+    final_evaluation = value.get("final_evaluation")
+    if not isinstance(final_evaluation, Mapping):
+        return False
+    try:
+        return float(final_evaluation.get("gui_records") or 0.0) > 0.0
+    except (TypeError, ValueError):
+        return False
 
 
 def _run(command: Sequence[str], *, dry_run: bool) -> None:
@@ -161,7 +179,11 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             init_dir = work_root / f"depth-{depth}-init"
             recovered_dir = work_root / f"depth-{depth}-recovered"
             is_final_depth = index == len(schedule) - 1
-            if not (args.resume and _accepted(recovered_dir)):
+            resume_ok = args.resume and _accepted(
+                recovered_dir,
+                require_gui_recovery=is_final_depth,
+            )
+            if not resume_ok:
                 build_command = [
                     sys.executable,
                     "scripts/build_gui_owl_student.py",
@@ -211,13 +233,16 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             current_source = str(recovered_dir)
             stages.append({"depth": depth, "checkpoint": str(recovered_dir)})
     else:
-        # 0.5B keeps a 16-layer topology, so initialize width/vision pruning from
-        # the accepted 16-layer 1.5B checkpoint rather than the six-layer 1B.
+        # 0.5B starts from the accepted 1.5B checkpoint and performs its final
+        # 20 -> 16 text selection together with structured width/vision pruning.
         init_dir = Path(
             str(student_entry.get("initialized") or work_root / "width-init")
         )
         recovered_dir = work_root / "width-recovered"
-        if not (args.resume and _accepted(recovered_dir)):
+        if not (
+            args.resume
+            and _accepted(recovered_dir, require_gui_recovery=True)
+        ):
             build_command = [
                 sys.executable,
                 "scripts/build_gui_owl_student.py",
