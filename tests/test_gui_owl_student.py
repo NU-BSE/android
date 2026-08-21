@@ -58,7 +58,8 @@ TEACHER_CONFIG = {
 def test_legacy_even_map_is_diagnostic_not_progressive_contract():
     mapping = evenly_spaced_layer_map(28, 6)
     assert mapping == (0, 5, 11, 16, 22, 27)
-    assert DEFAULT_DEPTH_SCHEDULES["1.5b"] == (24, 20, 16)
+    assert DEFAULT_STUDENT_SPECS["1.5b"].text_layers == 20
+    assert DEFAULT_DEPTH_SCHEDULES["1.5b"] == (24, 20)
     assert DEFAULT_DEPTH_SCHEDULES["1b"] == (12, 9, 6)
 
 
@@ -157,6 +158,22 @@ def test_tail_protection_keeps_the_final_blocks_saliency_would_drop():
 
     protected = select_salient_layer_ids(scores, source, 6, protect_tail=4)
     assert protected == (0, 1, 6, 7, 8, 9)
+
+
+def test_stale_recommended_map_cannot_bypass_tail_protection():
+    from scripts.build_gui_owl_student import _select_text_layers
+
+    source = tuple(range(28))
+    # A pre-protection manifest can be shape-valid while dropping blocks 22-26.
+    unsafe = tuple(range(19)) + (27,)
+    calibration = {
+        "recommended": {"text_layers_by_depth": {"20": list(unsafe)}},
+        "text": {"layer_scores": [100.0 - index for index in range(28)]},
+    }
+    selected = _select_text_layers(calibration, source, 20)
+    assert selected != unsafe
+    assert len(selected) == 20
+    assert {22, 23, 24, 25, 26, 27}.issubset(selected)
 
 
 def test_tail_protection_prefers_blocks_nearest_the_output_when_depth_is_tight():
