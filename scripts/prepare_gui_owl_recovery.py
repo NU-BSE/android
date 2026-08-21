@@ -2,9 +2,10 @@
 """Prepare a filtered broad instruction corpus for structural student recovery.
 
 The default source is the MIT-licensed HuggingFaceH4/ultrachat_200k train_sft
-split at a pinned dataset revision. It is text-only by design; the recovery
-trainer mixes these broad conversations with the existing multimodal GUI corpus
-so structural recovery does not depend only on Android Settings examples.
+split at a pinned dataset revision. It is text-only by design and supplies broad
+language coverage only. The configured recovery stage pairs it with existing
+multimodal GUI/chat corpora, and the trainer refuses a 100% text-only structural
+recovery mix.
 """
 from __future__ import annotations
 
