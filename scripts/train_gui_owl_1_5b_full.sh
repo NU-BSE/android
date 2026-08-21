@@ -116,7 +116,7 @@ else
   [[ -n "$DISTILL_MAX_RECORDS" ]] && args+=(--max-records-per-corpus "$DISTILL_MAX_RECORDS")
   [[ -n "$DISTILL_MAX_UPDATES" ]] && args+=(--max-updates "$DISTILL_MAX_UPDATES")
 
-  echo '==> Running 28 -> 24 -> 20 -> 16 progressive recovery, on-policy KD, specialization'
+  echo '==> Running 28 -> 24 -> 20 progressive recovery, on-policy KD, specialization'
   python scripts/run_gui_owl_progressive_distillation.py "${args[@]}"
 fi
 
