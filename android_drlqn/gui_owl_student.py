@@ -105,7 +105,7 @@ DEFAULT_STUDENT_SPECS: dict[str, StudentSpec] = {
     "1.5b": StudentSpec(
         name="1.5b",
         target_parameters=1_500_000_000,
-        text_layers=16,
+        text_layers=20,
         text_hidden_size=2048,
         text_intermediate_size=6144,
         text_attention_heads=16,
@@ -151,9 +151,9 @@ DEFAULT_STUDENT_SPECS: dict[str, StudentSpec] = {
 }
 
 # Depth-only students are not built in one jump.  The 1B schedule deliberately
-# starts from the recovered 16-layer 1.5B checkpoint, not from the 28-layer 2B.
+# starts from the recovered 20-layer 1.5B checkpoint, not from the 28-layer 2B.
 DEFAULT_DEPTH_SCHEDULES: dict[str, tuple[int, ...]] = {
-    "1.5b": (24, 20, 16),
+    "1.5b": (24, 20),
     "1b": (12, 9, 6),
     "0.5b": (),
 }
@@ -216,8 +216,8 @@ def select_salient_layer_ids(
     """Choose a nested subset of original layer IDs by calibration saliency.
 
     ``source_layer_ids`` is the lineage of the current checkpoint.  Returning
-    original IDs rather than current positions makes repeated 28->24->20->16
-    and 16->12->9->6 reductions stable across intermediate checkpoints.
+    original IDs rather than current positions keeps repeated progressive
+    reductions stable across intermediate checkpoints.
     """
 
     source = tuple(int(value) for value in source_layer_ids)
