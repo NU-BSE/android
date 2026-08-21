@@ -274,12 +274,12 @@ def test_trainable_vision_refuses_a_text_only_recovery_mix(tmp_path: Path):
             vision_trainable=True,
         )
 
-    # Every configured student opts into multimodal recovery; 0.5b additionally
-    # trains its pruned vision tower.
-    assert all(
-        entry["recovery_include_specialized"] is True
-        for entry in plan["students"].values()
-    )
+    # Keep the current paid change scoped to 1.5B. 0.5B already opted in
+    # because it trains vision; 1B will fail the generic text-stack guard until
+    # its recovery diet is reviewed separately.
+    assert plan["students"]["1.5b"]["recovery_include_specialized"] is True
+    assert plan["students"]["0.5b"]["recovery_include_specialized"] is True
+    assert "recovery_include_specialized" not in plan["students"]["1b"]
     assert plan["students"]["0.5b"]["freeze_vision_during_kd"] is False
     sources = _stage_sources(
         plan,
