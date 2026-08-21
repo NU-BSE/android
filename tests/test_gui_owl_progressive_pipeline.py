@@ -95,10 +95,11 @@ def test_recovery_preparer_is_pinned_and_filters_incomplete_dialogues():
     assert incomplete is None
 
 
-def test_progressive_sources_avoid_one_shot_depth_and_bad_half_b_cascade():
+def test_progressive_sources_stop_1_5b_at_depth_20():
     plan = _plan()
     progressive = plan["progressive"]
-    assert progressive["1.5b"]["text_depth_schedule"] == [24, 20, 16]
+    assert progressive["1.5b"]["text_depth_schedule"] == [24, 20]
+    assert plan["students"]["1.5b"]["text_layers"] == 20
     assert progressive["1b"]["text_depth_schedule"] == [12, 9, 6]
     assert progressive["1b"]["source"].endswith("gui-owl-1.5b-distilled")
     assert progressive["0.5b"]["source"].endswith("gui-owl-1.5b-distilled")
@@ -186,7 +187,7 @@ def _plan_with_corpora(tmp_path: Path, plan: dict[str, object]) -> dict[str, obj
     return plan
 
 
-def test_stage_a_is_broad_only_unless_the_student_trains_vision(tmp_path: Path):
+def test_depth_20_recovery_mixes_broad_and_multimodal_sources(tmp_path: Path):
     from scripts.distill_gui_owl_student import _stage_sources
 
     plan = _plan_with_corpora(tmp_path, _plan())
@@ -194,41 +195,69 @@ def test_stage_a_is_broad_only_unless_the_student_trains_vision(tmp_path: Path):
     assert recovery["include_specialized"] is False
 
     specialized = set(plan["specialized_corpora"])
-    broad_only = _stage_sources(plan, "recovery", recovery)
-    assert specialized.isdisjoint({source.name for source in broad_only})
+    student = plan["students"]["1.5b"]
+    assert student["recovery_include_specialized"] is True
+    sources = _stage_sources(
+        plan,
+        "recovery",
+        recovery,
+        student_entry=student,
+        vision_trainable=False,
+    )
+    names = {source.name for source in sources}
+    assert specialized.issubset(names)
+    assert "broad_instruction_multimodal" in names
+    assert any(source.text_only for source in sources)
+    assert any(not source.text_only for source in sources)
 
-    # Stage C still specializes.
-    names = {
+    # Stage C remains specialized-only.
+    stage_c = {
         source.name
         for source in _stage_sources(plan, "specialize", plan["stages"]["specialize"])
     }
-    assert names == specialized
+    assert stage_c == specialized
+
+
+def test_text_stack_refuses_a_text_only_recovery_mix_even_with_frozen_vision(tmp_path: Path):
+    import pytest
+
+    from scripts.distill_gui_owl_student import _stage_sources
+
+    plan = _plan_with_corpora(tmp_path, _plan())
+    with pytest.raises(ValueError, match="trainable text stack"):
+        _stage_sources(
+            plan,
+            "recovery",
+            plan["stages"]["recovery"],
+            student_entry={},
+            vision_trainable=False,
+        )
 
 
 def test_trainable_vision_refuses_a_text_only_recovery_mix(tmp_path: Path):
-    """A pruned, unfrozen vision tower gets no gradient from text-only records.
-
-    The broad recovery corpus is text-only by construction, so excluding the
-    multimodal specialization sets would leave 0.5b's pruned tower untrained
-    for the whole of stage A.
-    """
+    """A pruned, unfrozen vision tower also requires multimodal recovery data."""
 
     import pytest
 
     from scripts.distill_gui_owl_student import _stage_sources
 
     plan = _plan_with_corpora(tmp_path, _plan())
-    with pytest.raises(ValueError, match="text_only"):
+    with pytest.raises(ValueError, match="text and vision stacks"):
         _stage_sources(
             plan,
             "recovery",
             plan["stages"]["recovery"],
+            student_entry={},
             vision_trainable=True,
         )
 
-    # 0.5b is the only student that trains vision, and it opts back in.
+    # Every configured student opts into multimodal recovery; 0.5b additionally
+    # trains its pruned vision tower.
+    assert all(
+        entry["recovery_include_specialized"] is True
+        for entry in plan["students"].values()
+    )
     assert plan["students"]["0.5b"]["freeze_vision_during_kd"] is False
-    assert plan["students"]["0.5b"]["recovery_include_specialized"] is True
     sources = _stage_sources(
         plan,
         "recovery",
