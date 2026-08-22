@@ -18,17 +18,20 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 from android_drlqn.gui_owl_student import (
-    TEXT_TAIL_PROTECTED_LAYERS,
     build_student_config_dict,
     expand_head_indices,
     expand_spatial_merge_indices,
     load_calibration_manifest,
     load_student_plan,
+    protected_text_layer_ids,
+    protected_text_tail_layers,
     relative_parameter_error,
     select_salient_layer_ids,
     source_positions_for_layer_ids,
     spec_from_plan,
     teacher_key_for_student,
+    text_layer_gap_limit,
+    text_layer_selection_is_safe,
 )
 
 
@@ -108,20 +111,9 @@ def _recommended(calibration: Mapping[str, object], key: str) -> object:
 def _protected_text_layer_ids(
     source_ids: Sequence[int], target_depth: int
 ) -> set[int]:
-    """Return the boundary/tail IDs a recommended manifest may not remove."""
+    """Compatibility wrapper for the shared scaled-tail structural contract."""
 
-    source = tuple(int(value) for value in source_ids)
-    if not source or not 1 <= target_depth <= len(source):
-        raise ValueError("target text depth must fit inside a non-empty source")
-    keep: set[int] = {source[0]}
-    if target_depth > 1:
-        keep.add(source[-1])
-    tail = source[len(source) - TEXT_TAIL_PROTECTED_LAYERS :]
-    for layer_id in reversed(tail):
-        if len(keep) >= target_depth:
-            break
-        keep.add(layer_id)
-    return keep
+    return protected_text_layer_ids(source_ids, target_depth)
 
 
 def _select_text_layers(
@@ -129,25 +121,26 @@ def _select_text_layers(
 ) -> tuple[int, ...]:
     if target_depth == len(source_ids):
         return tuple(int(value) for value in source_ids)
-    required = _protected_text_layer_ids(source_ids, target_depth)
     recommended = _recommended(calibration, "text_layers_by_depth")
     if isinstance(recommended, Mapping):
         candidate = recommended.get(str(target_depth))
         if isinstance(candidate, Sequence) and not isinstance(candidate, (str, bytes)):
             selected = tuple(int(value) for value in candidate)
-            if (
-                len(selected) == target_depth
-                and set(selected).issubset(set(source_ids))
-                and required.issubset(set(selected))
-            ):
+            if len(selected) == target_depth and text_layer_selection_is_safe(source_ids, selected):
                 return selected
-    # Old calibration manifests may predate tail protection. Never let an
-    # otherwise-valid recommended map bypass the live safety contract: rebuild
-    # a nested selection from the recorded scores instead.
+    # Old calibration manifests may predate scaled tail protection or the
+    # small-depth coverage guard. Never let a syntactically valid recommended
+    # map bypass the live safety contract: rebuild it from recorded saliency.
     scores = _calibration_scores(calibration, "text", "layer_scores")
-    return select_salient_layer_ids(
-        scores, source_ids, target_depth, protect_tail=TEXT_TAIL_PROTECTED_LAYERS
+    selected = select_salient_layer_ids(
+        scores,
+        source_ids,
+        target_depth,
+        protect_tail=protected_text_tail_layers(target_depth),
     )
+    if not text_layer_selection_is_safe(source_ids, selected):
+        raise RuntimeError(f"live text layer selection violates structural safety: {selected}")
+    return selected
 
 
 def _select_vision_layers(
@@ -322,7 +315,6 @@ def _structured_width_tensor(key: str, source, selectors: _WidthSelectors, torch
             return _index_select(source, 0, mlp, torch_module)
         if suffix == "mlp.down_proj.bias":
             return _index_select(source, 0, hidden, torch_module)
-        # q_norm/k_norm are per-head-dimension and remain exact-width tensors.
         if suffix in {"self_attn.q_norm.weight", "self_attn.k_norm.weight"}:
             return source
 
@@ -591,6 +583,12 @@ def build(args: argparse.Namespace) -> dict[str, object]:
         "source_text_original_layer_ids": list(source_text_ids),
         "text_original_layer_ids": list(selected_text_ids),
         "text_source_positions": list(text_layer_map),
+        "text_tail_protected_layers": protected_text_tail_layers(target_text_depth),
+        "text_layer_gap_limit": text_layer_gap_limit(source_text_ids, target_text_depth),
+        "text_max_original_layer_gap": max(
+            (b - a for a, b in zip(selected_text_ids, selected_text_ids[1:])),
+            default=0,
+        ),
         "source_vision_original_layer_ids": list(source_vision_ids),
         "vision_original_layer_ids": list(selected_vision_ids),
         "vision_source_positions": list(vision_layer_map),
