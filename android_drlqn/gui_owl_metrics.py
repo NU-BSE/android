@@ -18,6 +18,17 @@ _ACTION_ALIASES = {
     "key": "system_button",
     "terminate": "answer",
     "ask_confirmation": "interact",
+    "ask_user": "interact",
+}
+_KNOWN_ACTIONS = {
+    "click",
+    "long_press",
+    "swipe",
+    "type",
+    "system_button",
+    "wait",
+    "answer",
+    "interact",
 }
 
 
@@ -78,7 +89,7 @@ def _coordinate(arguments: Mapping[str, object]) -> tuple[float, float] | None:
 
 
 def parse_tool_call(text: str) -> ParsedToolCall | None:
-    """Parse the first GUI-Owl tool call without collapsing action classes."""
+    """Parse the first known GUI-Owl tool call without collapsing action classes."""
 
     match = _TOOL_CALL_RE.search(text)
     if not match:
@@ -90,7 +101,7 @@ def parse_tool_call(text: str) -> ParsedToolCall | None:
     if not isinstance(value, Mapping):
         return None
     name = _canonical_action_name(value.get("name"))
-    if not name:
+    if not name or name not in _KNOWN_ACTIONS:
         return None
     arguments = value.get("arguments") or {}
     if not isinstance(arguments, Mapping):
