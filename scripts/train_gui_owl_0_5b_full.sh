@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # Full v2 training path for the ~0.5B GUI-Owl student on one CUDA GPU.
-# Requires an accepted 1.5B v2 predecessor because the 0.5B target keeps a
-# 16-layer text topology. Stops at the accepted Hugging Face checkpoint and
+# Requires a grounding-gated 1.5B v2 predecessor because the 0.5B target keeps
+# a 16-layer text topology. Stops at the accepted Hugging Face checkpoint and
 # packages only trained weights; no GGUF conversion.
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -31,15 +31,12 @@ exec > >(tee -a "$log_file") 2>&1
 
 accepted() {
   local checkpoint="$1"
-  python - "$checkpoint/distillation-manifest.json" <<'PY' >/dev/null 2>&1
-import json
+  python - "$checkpoint" <<'PY' >/dev/null 2>&1
 import sys
 from pathlib import Path
-path = Path(sys.argv[1])
-if not path.is_file():
-    raise SystemExit(1)
-value = json.loads(path.read_text(encoding="utf-8"))
-raise SystemExit(0 if value.get("accepted") is True else 1)
+from scripts.run_gui_owl_progressive_distillation import _accepted
+checkpoint = Path(sys.argv[1])
+raise SystemExit(0 if _accepted(checkpoint, require_gui_correctness=True) else 1)
 PY
 }
 
@@ -86,8 +83,8 @@ for name, root in (
 PY
 
 if ! accepted "$predecessor"; then
-  echo "error: 0.5B training requires an accepted 1.5B predecessor: $predecessor" >&2
-  echo "run first: bash scripts/train_gui_owl_1_5b_full.sh" >&2
+  echo "error: 0.5B training requires a grounding-gated 1.5B predecessor: $predecessor" >&2
+  echo "the predecessor must record action-name match >= 0.70 and median coordinate error <= 100" >&2
   exit 1
 fi
 
@@ -120,7 +117,7 @@ if value.get("width_pruning_ready") is not True:
 PY
 
 if [[ "$RESUME" == "1" ]] && accepted "$final"; then
-  echo "==> Final 0.5B checkpoint is already accepted; skipping training"
+  echo "==> Final 0.5B checkpoint is already accepted under grounding gates; skipping training"
 else
   args=(
     --student 0.5b
@@ -130,12 +127,12 @@ else
   [[ -n "$DISTILL_MAX_RECORDS" ]] && args+=(--max-records-per-corpus "$DISTILL_MAX_RECORDS")
   [[ -n "$DISTILL_MAX_UPDATES" ]] && args+=(--max-updates "$DISTILL_MAX_UPDATES")
 
-  echo '==> Running accepted 1.5B -> structured width/vision prune -> recovery -> on-policy KD -> specialization'
+  echo '==> Running grounded 1.5B -> structured width/vision prune -> recovery -> on-policy KD -> specialization'
   python scripts/run_gui_owl_progressive_distillation.py "${args[@]}"
 fi
 
 if ! accepted "$final"; then
-  echo "error: final 0.5B checkpoint did not pass generation gates: $final" >&2
+  echo "error: final 0.5B checkpoint did not pass grounding-aware generation gates: $final" >&2
   exit 1
 fi
 
