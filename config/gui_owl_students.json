@@ -69,7 +69,9 @@
       "generation_gate": {
         "first_token_eos_rate_max": 0.05,
         "empty_generation_rate_max": 0.05,
-        "median_generated_tokens_min": 8
+        "median_generated_tokens_min": 8,
+        "gui_action_name_match_rate_min": 0.70,
+        "gui_median_coordinate_error_max": 100.0
       }
     },
     "on_policy": {
@@ -99,7 +101,9 @@
         "first_token_eos_rate_max": 0.05,
         "empty_generation_rate_max": 0.05,
         "median_generated_tokens_min": 8,
-        "gui_parse_rate_min": 0.5
+        "gui_parse_rate_min": 0.5,
+        "gui_action_name_match_rate_min": 0.70,
+        "gui_median_coordinate_error_max": 100.0
       }
     },
     "specialize": {
@@ -128,7 +132,9 @@
         "first_token_eos_rate_max": 0.05,
         "empty_generation_rate_max": 0.05,
         "median_generated_tokens_min": 8,
-        "gui_parse_rate_min": 0.5
+        "gui_parse_rate_min": 0.5,
+        "gui_action_name_match_rate_min": 0.70,
+        "gui_median_coordinate_error_max": 100.0
       }
     }
   },
@@ -164,6 +170,7 @@
       "vision_heads": 16,
       "deepstack_visual_indexes": [5, 11, 17],
       "freeze_vision_during_kd": true,
+      "recovery_include_specialized": true,
       "max_relative_parameter_error": 0.15,
       "initialized": "artifacts/students/v2/gui-owl-1b-init",
       "distilled": "artifacts/students/v2/gui-owl-1b-distilled"
