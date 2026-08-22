@@ -108,7 +108,7 @@ class ContractTokenWeighter:
             # observed depth-24 students, so weight the opening marker highest.
             result[row, open_index : min(suffix_end, open_index + len(open_pattern))] = self.focus_weight
             if ids and self.first_token_weight != 1.0:
-                result[row, 0] = max(float(result[row, 0]), self.first_token_weight)
+                result[row, 0] = max(self.prefix_weight, self.first_token_weight)
         return result
 
 
