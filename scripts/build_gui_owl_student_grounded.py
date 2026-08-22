@@ -10,7 +10,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts import build_gui_owl_student as base  # noqa: E402
-from scripts.gui_owl_grounding_revision import (  # noqa: E402
+from scripts.gui_owl_grounding_structural import (  # noqa: E402
     protected_text_layer_ids,
     select_salient_layer_ids,
     text_layer_gap_limit,
