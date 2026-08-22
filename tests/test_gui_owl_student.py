@@ -156,8 +156,6 @@ def test_tail_protection_is_scaled_before_small_depth_coverage_selection():
     unprotected = select_salient_layer_ids(scores, source, 6)
     assert unprotected == (0, 1, 2, 3, 4, 9)
 
-    # Even a caller requesting four protected tail blocks is capped to the
-    # depth-6 policy of two. Coverage then keeps interior representation.
     protected = select_salient_layer_ids(scores, source, 6, protect_tail=4)
     assert protected == (0, 1, 2, 4, 8, 9)
     assert {8, 9}.issubset(protected)
