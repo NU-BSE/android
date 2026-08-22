@@ -30,15 +30,12 @@ exec > >(tee -a "$log_file") 2>&1
 
 accepted() {
   local checkpoint="$1"
-  python - "$checkpoint/distillation-manifest.json" <<'PY' >/dev/null 2>&1
-import json
+  python - "$checkpoint" <<'PY' >/dev/null 2>&1
 import sys
 from pathlib import Path
-path = Path(sys.argv[1])
-if not path.is_file():
-    raise SystemExit(1)
-value = json.loads(path.read_text(encoding="utf-8"))
-raise SystemExit(0 if value.get("accepted") is True else 1)
+from scripts.run_gui_owl_progressive_distillation import _accepted
+checkpoint = Path(sys.argv[1])
+raise SystemExit(0 if _accepted(checkpoint, require_gui_correctness=True) else 1)
 PY
 }
 
@@ -105,7 +102,7 @@ fi
 require_file "$calibration"
 
 if [[ "$RESUME" == "1" ]] && accepted "$final"; then
-  echo "==> Final 1.5B checkpoint is already accepted; skipping training"
+  echo "==> Final 1.5B checkpoint is already accepted under grounding gates; skipping training"
 else
   args=(
     --student 1.5b
@@ -121,7 +118,7 @@ else
 fi
 
 if ! accepted "$final"; then
-  echo "error: final 1.5B checkpoint did not pass generation gates: $final" >&2
+  echo "error: final 1.5B checkpoint did not pass grounding-aware generation gates: $final" >&2
   exit 1
 fi
 
