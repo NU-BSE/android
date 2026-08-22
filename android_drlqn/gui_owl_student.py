@@ -217,7 +217,7 @@ the protected tail with target depth while keeping six as the upper bound.
 """
 
 TEXT_COVERAGE_BALANCED_MAX_DEPTH = 12
-"""At or below this depth, enforce an explicit maximum original-layer gap."""
+"""At or below this depth, protected text selection enforces a max layer gap."""
 
 TEXT_LAYER_GAP_FACTOR = 1.75
 """Maximum small-depth gap relative to ideal even spacing, before inherited gaps."""
@@ -308,22 +308,13 @@ def _coverage_constrained_saliency_selection(
     required: set[int],
     gap_limit: int,
 ) -> tuple[int, ...]:
-    """Maximize saliency subject to exact depth, required IDs, and max gap.
-
-    Production text pruning protects both source boundaries, so the dynamic
-    program starts at the first source block and ends at the last. Transitions
-    may not jump over another required block. With at most 28 source layers and
-    target depth at most 12 this O(K*N^2) search is negligible compared with
-    loading a checkpoint and gives an actual coverage guarantee rather than a
-    heuristic bucket preference.
-    """
+    """Maximize saliency subject to exact depth, required IDs, and max gap."""
 
     if source[0] not in required or source[-1] not in required:
         raise ValueError("coverage-constrained selection requires protected boundaries")
     required_positions = {
         index for index, layer_id in enumerate(source) if layer_id in required
     }
-    # (source_position, selected_count) -> (saliency_sum, selected_original_ids)
     dp: dict[tuple[int, int], tuple[float, tuple[int, ...]]] = {
         (0, 1): (score_by_id[source[0]], (source[0],))
     }
@@ -374,11 +365,12 @@ def select_salient_layer_ids(
 
     ``source_layer_ids`` is the lineage of the current checkpoint. Returning
     original IDs rather than current positions keeps repeated progressive
-    reductions stable across intermediate checkpoints. A requested tail count
-    is treated as a maximum and automatically scaled down with target depth, so
-    legacy callers that still pass ``protect_tail=6`` cannot recreate the
-    depth-6 [0,23,24,25,26,27] pathology. At depth <=12, selection maximizes
-    saliency subject to an explicit max-gap coverage constraint.
+    reductions stable across intermediate checkpoints. A requested text-tail
+    count is treated as a maximum and automatically scaled down with target
+    depth, so legacy callers that still pass ``protect_tail=6`` cannot recreate
+    the depth-6 [0,23,24,25,26,27] pathology. At depth <=12, protected text
+    selection maximizes saliency subject to an explicit max-gap constraint.
+    Calls with ``protect_tail=0`` retain the generic/vision saliency behavior.
     """
 
     source = tuple(int(value) for value in source_layer_ids)
@@ -410,12 +402,12 @@ def select_salient_layer_ids(
             break
         keep.add(layer_id)
 
-    gap_limit = text_layer_gap_limit(source, target_layers)
-    if (
-        gap_limit is not None
-        and protect_boundaries
-        and target_layers <= TEXT_COVERAGE_BALANCED_MAX_DEPTH
-    ):
+    gap_limit = (
+        text_layer_gap_limit(source, target_layers)
+        if effective_tail > 0 and protect_boundaries
+        else None
+    )
+    if gap_limit is not None and target_layers <= TEXT_COVERAGE_BALANCED_MAX_DEPTH:
         result = _coverage_constrained_saliency_selection(
             source,
             score_by_id,
