@@ -3,13 +3,15 @@
 
 The failed 24-layer experiments established that ordinary teacher-forced
 recovery can lower CE/KL while free generation stops after the visible Action
-line.  This runner therefore treats output-contract recovery as a first-class
+line. This runner therefore treats output-contract recovery as a first-class
 stage after every structural depth cut:
 
     build -> contract bootstrap -> grounded mixed recovery
 
-for both 28->24 and 24->20.  Only then does it run on-policy alignment and
-specialization.  Every transition is gated and every checkpoint is retained.
+for both 28->24 and 24->20. Only then does it run on-policy alignment and
+specialization. Every transition is gated, periodic best checkpoints can be
+rescued if a later update regresses, and promotion happens only after an
+independent 64-record semantic evaluation.
 """
 from __future__ import annotations
 
@@ -26,6 +28,8 @@ from typing import Mapping, Sequence
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+from android_drlqn.gui_owl_student import resolve_peft_adapter_dir  # noqa: E402
 
 TEACHER = "mPLUG/GUI-Owl-1.5-2B-Instruct"
 DEFAULT_CONFIG = Path("config/gui_owl_students.json")
@@ -84,12 +88,17 @@ def _require_inputs(config: Path, calibration: Path) -> None:
         Path("artifacts/training/gui-owl-recovery.jsonl"),
         Path("artifacts/training/gui-policy-unigui-openmobile.jsonl"),
         Path("artifacts/training/chat-screen-qa-qwen.jsonl"),
-        Path("artifacts/adapters/gui_policy/adapter_config.json"),
-        Path("artifacts/adapters/chat/adapter_config.json"),
     )
     missing = [str(path) for path in required if not path.is_file()]
     if missing:
         raise FileNotFoundError("missing production input(s):\n- " + "\n- ".join(missing))
+
+    plan = _read_json(config)
+    adapters = plan.get("teacher_adapters")
+    if not isinstance(adapters, Mapping):
+        raise ValueError("GUI-Owl config lacks teacher_adapters")
+    for mode in ("gui_policy", "chat"):
+        resolve_peft_adapter_dir(Path(str(adapters.get(mode) or "")), mode)
 
 
 def _production_config(base_path: Path, output: Path, *, bootstrap: bool) -> dict[str, object]:
@@ -124,8 +133,6 @@ def _production_config(base_path: Path, output: Path, *, bootstrap: bool) -> dic
                 "eval_max_new_tokens": 64,
             }
         )
-        # Bootstrap acceptance is decided by this runner using marker rates;
-        # the trainer is invoked with --allow-gate-failure.
         recovery["generation_gate"] = {
             "first_token_eos_rate_max": 0.05,
             "empty_generation_rate_max": 0.05,
@@ -229,27 +236,23 @@ def _write_configs(base: Path, work: Path, candidate: Path) -> tuple[Path, Path]
     return production, bootstrap
 
 
-def _final_metrics(checkpoint: Path) -> dict[str, object] | None:
-    path = checkpoint / "distillation-manifest.json"
-    if not path.is_file():
-        return None
-    value = _read_json(path)
-    metrics = value.get("final_evaluation")
-    if not isinstance(metrics, Mapping):
-        return None
-    return dict(metrics)
+def _checkpoint_metrics(checkpoint: Path) -> dict[str, object] | None:
+    manifest = checkpoint / "distillation-manifest.json"
+    if manifest.is_file():
+        value = _read_json(manifest)
+        metrics = value.get("final_evaluation")
+        if isinstance(metrics, Mapping):
+            return dict(metrics)
+    periodic = checkpoint / "checkpoint-metrics.json"
+    if periodic.is_file():
+        value = _read_json(periodic)
+        metrics = value.get("metrics")
+        if isinstance(metrics, Mapping):
+            return dict(metrics)
+    return None
 
 
-def _semantic_pass(checkpoint: Path) -> bool:
-    path = checkpoint / "distillation-manifest.json"
-    if not path.is_file():
-        return False
-    value = _read_json(path)
-    if value.get("accepted") is not True:
-        return False
-    metrics = value.get("final_evaluation")
-    if not isinstance(metrics, Mapping):
-        return False
+def _semantic_metrics_pass(metrics: Mapping[str, object]) -> bool:
     try:
         return (
             float(metrics.get("gui_parse_rate", 0.0)) >= SEMANTIC_PARSE_MIN
@@ -259,6 +262,22 @@ def _semantic_pass(checkpoint: Path) -> bool:
         )
     except (TypeError, ValueError):
         return False
+
+
+def _semantic_checkpoint(output: Path) -> Path | None:
+    manifest = output / "distillation-manifest.json"
+    if manifest.is_file():
+        value = _read_json(manifest)
+        metrics = value.get("final_evaluation")
+        if value.get("accepted") is True and isinstance(metrics, Mapping) and _semantic_metrics_pass(metrics):
+            return output
+        best = str(value.get("best_checkpoint") or "").strip()
+        if best:
+            best_path = Path(best)
+            best_metrics = _checkpoint_metrics(best_path)
+            if best_metrics is not None and _semantic_metrics_pass(best_metrics):
+                return best_path
+    return None
 
 
 def _contract_pass(metrics: Mapping[str, object]) -> bool:
@@ -348,7 +367,7 @@ def _bootstrap_contract(
     if resume:
         for chunk in range(1, max_chunks + 1):
             checkpoint = root / f"chunk-{chunk}"
-            metrics = _final_metrics(checkpoint)
+            metrics = _checkpoint_metrics(checkpoint)
             if metrics is None:
                 break
             print(
@@ -402,7 +421,7 @@ def _bootstrap_contract(
             ),
             log=log,
         )
-        metrics = _final_metrics(checkpoint)
+        metrics = _checkpoint_metrics(checkpoint)
         if metrics is None:
             raise RuntimeError(f"contract checkpoint has no final metrics: {checkpoint}")
         open_rate = float(metrics.get("gui_tool_call_open_rate", 0.0))
@@ -439,10 +458,12 @@ def _distill_stage(
     resume: bool,
     env: Mapping[str, str],
     max_records: int | None,
-) -> None:
-    if resume and _semantic_pass(output):
-        print(f"==> resume: keeping accepted {stage} checkpoint {output}")
-        return
+) -> Path:
+    if resume:
+        selected = _semantic_checkpoint(output)
+        if selected is not None:
+            print(f"==> resume: keeping accepted {stage} checkpoint {selected}")
+            return selected
     command = [
         sys.executable,
         TRAINER,
@@ -462,12 +483,22 @@ def _distill_stage(
         str(updates),
         "--config",
         str(config),
+        "--allow-gate-failure",
     ]
     if max_records is not None:
         command += ["--max-records-per-corpus", str(max_records)]
     _stream(command, env=env, log=log)
-    if not _semantic_pass(output):
-        raise RuntimeError(f"{stage} finished without the required grounding gate: {output}")
+    selected = _semantic_checkpoint(output)
+    if selected is None:
+        metrics = _checkpoint_metrics(output) or {}
+        raise RuntimeError(
+            f"{stage} produced no final or periodic checkpoint satisfying the grounding gate: "
+            f"parse={metrics.get('gui_parse_rate')} action={metrics.get('gui_action_name_match_rate')} "
+            f"coord={metrics.get('gui_median_coordinate_error')}"
+        )
+    if selected != output:
+        print(f"==> {stage}: final update regressed; using periodic best checkpoint {selected}")
+    return selected
 
 
 def _evaluate_final(candidate: Path, work: Path, device: str, log: Path) -> dict[str, object]:
@@ -522,8 +553,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     work = Path(args.work_root or f"artifacts/students/v2/production-1.5b/{tag}")
     work.mkdir(parents=True, exist_ok=True)
     logs = work / "logs"
-    candidate = work / "final"
-    production_config, bootstrap_config = _write_configs(config, work, candidate)
+    candidate_output = work / "final"
+    production_config, bootstrap_config = _write_configs(config, work, candidate_output)
 
     state: dict[str, object] = {
         "schema_version": 1,
@@ -560,11 +591,10 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     state["stages"].append({"stage": "depth24_contract", "checkpoint": str(depth24_contract)})
     _record_state(work, state)
 
-    depth24_recovered = work / "depth-24-recovered"
-    _distill_stage(
+    depth24_recovered = _distill_stage(
         stage="recovery",
         source=depth24_contract,
-        output=depth24_recovered,
+        output=work / "depth-24-recovered",
         config=production_config,
         device=args.device,
         updates=args.depth24_recovery_updates,
@@ -608,11 +638,10 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     state["stages"].append({"stage": "depth20_contract", "checkpoint": str(depth20_contract)})
     _record_state(work, state)
 
-    depth20_recovered = work / "depth-20-recovered"
-    _distill_stage(
+    depth20_recovered = _distill_stage(
         stage="recovery",
         source=depth20_contract,
-        output=depth20_recovered,
+        output=work / "depth-20-recovered",
         config=production_config,
         device=args.device,
         updates=args.depth20_recovery_updates,
@@ -632,11 +661,10 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     state["stages"].append({"stage": "depth20_recovery", "checkpoint": str(depth20_recovered)})
     _record_state(work, state)
 
-    on_policy = work / "on-policy"
-    _distill_stage(
+    on_policy = _distill_stage(
         stage="on_policy",
         source=depth20_recovered,
-        output=on_policy,
+        output=work / "on-policy",
         config=production_config,
         device=args.device,
         updates=args.on_policy_updates,
@@ -656,10 +684,10 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     state["stages"].append({"stage": "on_policy", "checkpoint": str(on_policy)})
     _record_state(work, state)
 
-    _distill_stage(
+    final_checkpoint = _distill_stage(
         stage="specialize",
         source=on_policy,
-        output=candidate,
+        output=candidate_output,
         config=production_config,
         device=args.device,
         updates=args.specialize_updates,
@@ -676,8 +704,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         ),
         max_records=args.max_records_per_corpus,
     )
-    final_summary = _evaluate_final(candidate, work, args.device, logs / "09-final-eval.log")
-    state["stages"].append({"stage": "specialize", "checkpoint": str(candidate)})
+    final_summary = _evaluate_final(final_checkpoint, work, args.device, logs / "09-final-eval.log")
+    state["stages"].append({"stage": "specialize", "checkpoint": str(final_checkpoint)})
     state["final_evaluation"] = final_summary
 
     if args.promote:
@@ -689,10 +717,11 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             shutil.move(str(canonical), str(backup))
             state["previous_canonical_backup"] = str(backup)
         canonical.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(candidate), str(canonical))
+        shutil.move(str(final_checkpoint), str(canonical))
         state["promoted_checkpoint"] = str(canonical)
     else:
         state["promoted_checkpoint"] = None
+        state["candidate_checkpoint"] = str(final_checkpoint)
 
     _record_state(work, state)
     return state
