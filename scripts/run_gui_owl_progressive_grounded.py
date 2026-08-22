@@ -124,7 +124,7 @@ else:
     sys.argv += ["--config", str(REVISION_CONFIG)]
 
 from scripts import run_gui_owl_progressive_distillation as base  # noqa: E402
-from scripts.gui_owl_grounding_revision import text_layer_selection_is_safe  # noqa: E402
+from scripts.gui_owl_grounding_structural import text_layer_selection_is_safe  # noqa: E402
 
 base.RECOVERY_TRAINER = "scripts/distill_gui_owl_grounded_balanced.py"
 base.POLICY_TRAINER = "scripts/distill_gui_owl_policy_grounded_balanced.py"
