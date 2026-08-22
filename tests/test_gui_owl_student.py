@@ -11,12 +11,15 @@ from android_drlqn.gui_owl_student import (
     expand_head_indices,
     expand_spatial_merge_indices,
     generation_gate_failures,
+    protected_text_tail_layers,
     ranked_indices,
     relative_parameter_error,
     resolve_peft_adapter_dir,
     select_salient_layer_ids,
     source_positions_for_layer_ids,
     teacher_key_for_student,
+    text_layer_gap_limit,
+    text_layer_selection_is_safe,
 )
 
 
@@ -147,9 +150,6 @@ def test_generation_gate_catches_eos_collapse_even_with_good_ce():
 
 
 def test_tail_protection_keeps_the_final_blocks_saliency_would_drop():
-    # Mirrors the real manifest: the last blocks score lowest, so an
-    # unconstrained selection drops them and collapses the output distribution
-    # onto <|im_end|> at the position a tool call must open.
     scores = [10.0, 0.9, 0.8, 0.7, 0.6, 0.5] + [0.1, 0.1, 0.1, 0.1]
     source = tuple(range(10))
 
@@ -160,11 +160,38 @@ def test_tail_protection_keeps_the_final_blocks_saliency_would_drop():
     assert protected == (0, 1, 6, 7, 8, 9)
 
 
+def test_scaled_tail_does_not_consume_small_depth_budget():
+    assert protected_text_tail_layers(24) == 6
+    assert protected_text_tail_layers(20) == 6
+    assert protected_text_tail_layers(16) == 5
+    assert protected_text_tail_layers(12) == 4
+    assert protected_text_tail_layers(9) == 3
+    assert protected_text_tail_layers(6) == 2
+
+
+def test_depth_6_selection_cannot_collapse_to_first_plus_last_five():
+    source = tuple(range(28))
+    # Deliberately make the tail overwhelmingly salient: coverage must still
+    # reserve interior slots instead of reproducing [0,23,24,25,26,27].
+    scores = [1.0] * 23 + [1000.0 + index for index in range(5)]
+    selected = select_salient_layer_ids(
+        scores,
+        source,
+        6,
+        protect_tail=protected_text_tail_layers(6),
+    )
+    assert selected != (0, 23, 24, 25, 26, 27)
+    assert {26, 27}.issubset(selected)
+    assert text_layer_selection_is_safe(source, selected)
+    limit = text_layer_gap_limit(source, 6)
+    assert limit is not None
+    assert max(b - a for a, b in zip(selected, selected[1:])) <= limit
+
+
 def test_stale_recommended_map_cannot_bypass_tail_protection():
     from scripts.build_gui_owl_student import _select_text_layers
 
     source = tuple(range(28))
-    # A pre-protection manifest can be shape-valid while dropping blocks 22-26.
     unsafe = tuple(range(19)) + (27,)
     calibration = {
         "recommended": {"text_layers_by_depth": {"20": list(unsafe)}},
@@ -176,24 +203,43 @@ def test_stale_recommended_map_cannot_bypass_tail_protection():
     assert {22, 23, 24, 25, 26, 27}.issubset(selected)
 
 
+def test_stale_depth_6_recommendation_cannot_bypass_coverage_guard():
+    from scripts.build_gui_owl_student import _select_text_layers
+
+    source = tuple(range(28))
+    unsafe = (0, 23, 24, 25, 26, 27)
+    calibration = {
+        "recommended": {"text_layers_by_depth": {"6": list(unsafe)}},
+        "text": {"layer_scores": [float(index) for index in range(28)]},
+    }
+    selected = _select_text_layers(calibration, source, 6)
+    assert selected != unsafe
+    assert len(selected) == 6
+    assert text_layer_selection_is_safe(source, selected)
+
+
 def test_tail_protection_prefers_blocks_nearest_the_output_when_depth_is_tight():
     scores = [10.0] + [0.1] * 9
     source = tuple(range(10))
-    # Three slots cannot hold a four-layer tail; the ones nearest the head win.
     assert select_salient_layer_ids(scores, source, 3, protect_tail=4) == (0, 8, 9)
     with pytest.raises(ValueError, match="protect_tail"):
         select_salient_layer_ids(scores, source, 3, protect_tail=-1)
 
 
-def test_tail_protected_selections_stay_nested_across_the_depth_schedule():
+def test_scaled_tail_selections_stay_nested_across_the_depth_schedule():
     scores = [10.0] + [1.0 / (index + 1) for index in range(1, 27)] + [5.0]
     selected = tuple(range(28))
     previous = set(selected)
     for depth in (24, 20, 16, 12, 9, 6):
-        selected = select_salient_layer_ids(scores, selected, depth, protect_tail=6)
+        selected = select_salient_layer_ids(
+            scores,
+            selected,
+            depth,
+            protect_tail=protected_text_tail_layers(depth),
+        )
         assert len(selected) == depth
-        # Each stage must initialize exactly from the previous checkpoint.
         assert set(selected).issubset(previous)
+        assert text_layer_selection_is_safe(tuple(sorted(previous)), selected)
         previous = set(selected)
 
 
@@ -211,7 +257,6 @@ def test_gui_parse_gate_rejects_an_unmeasured_parse_rate():
         "mean_teacher_kl": 2.49,
         "mean_supervised_ce": 2.31,
     }
-    # No GUI record reached the evaluator, so the rate carries no evidence.
     failures = generation_gate_failures({**healthy, "gui_records": 0.0, "gui_parse_rate": 0.0}, gate)
     assert any("unmeasured" in value for value in failures)
 
@@ -219,6 +264,45 @@ def test_gui_parse_gate_rejects_an_unmeasured_parse_rate():
         {**healthy, "gui_records": 8.0, "gui_parse_rate": 0.75}, gate
     )
     assert not measured
+
+
+def test_grounding_gate_rejects_syntactically_valid_center_tap_policy():
+    gate = GenerationGate(
+        gui_parse_rate_min=0.5,
+        gui_action_name_match_rate_min=0.70,
+        gui_median_coordinate_error_max=100.0,
+    )
+    common = {
+        "first_token_eos_rate": 0.0,
+        "empty_generation_rate": 0.0,
+        "median_generated_tokens": 27.5,
+        "gui_records": 64.0,
+        "gui_action_records": 64.0,
+        "gui_coordinate_records": 41.0,
+    }
+    student = generation_gate_failures(
+        {
+            **common,
+            "gui_parse_rate": 0.984,
+            "gui_action_name_match_rate": 0.641,
+            "gui_median_coordinate_error": 340.0,
+        },
+        gate,
+    )
+    assert any("gui_action_name_match_rate" in value for value in student)
+    assert any("gui_median_coordinate_error" in value for value in student)
+    assert not any("gui_parse_rate" in value for value in student)
+
+    teacher_like = generation_gate_failures(
+        {
+            **common,
+            "gui_parse_rate": 0.938,
+            "gui_action_name_match_rate": 0.828,
+            "gui_median_coordinate_error": 4.0,
+        },
+        gate,
+    )
+    assert not teacher_like
 
 
 def test_parameter_error_and_invalid_teacher_config():
