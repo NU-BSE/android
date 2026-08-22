@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 from typing import Mapping, Sequence
 
-from android_drlqn.gui_owl_student import TEXT_TAIL_PROTECTED_LAYERS, load_student_plan
+from android_drlqn.gui_owl_student import load_student_plan, text_layer_selection_is_safe
 
 # Support both documented direct execution (`python scripts/...py`) and package
 # imports used by tests (`from scripts.run_... import ...`). When a file inside
@@ -51,7 +51,7 @@ def _progressive_entry(plan: Mapping[str, object], name: str) -> dict[str, objec
 
 
 def _tail_protected_lineage(path: Path) -> bool:
-    """Return whether a checkpoint's stored structural build kept the protected tail."""
+    """Return whether stored structural lineage satisfies current tail/coverage safety."""
 
     lineage: Mapping[str, object] | None = None
     for name in ("compression-lineage.json", "student-build-manifest.json"):
@@ -64,30 +64,33 @@ def _tail_protected_lineage(path: Path) -> bool:
             break
     if lineage is None:
         return False
-
     try:
         source = tuple(int(value) for value in lineage.get("source_text_original_layer_ids") or ())
         selected = tuple(int(value) for value in lineage.get("text_original_layer_ids") or ())
     except (TypeError, ValueError):
         return False
-    if not source or not selected or len(selected) > len(source):
-        return False
-    if len(set(source)) != len(source) or len(set(selected)) != len(selected):
-        return False
-    if tuple(sorted(source)) != source or tuple(sorted(selected)) != selected:
-        return False
-    if not set(selected).issubset(set(source)):
-        return False
+    return text_layer_selection_is_safe(source, selected)
 
-    required: set[int] = {source[0]}
-    if len(selected) > 1:
-        required.add(source[-1])
-    tail = source[len(source) - TEXT_TAIL_PROTECTED_LAYERS :]
-    for layer_id in reversed(tail):
-        if len(required) >= len(selected):
-            break
-        required.add(layer_id)
-    return required.issubset(set(selected))
+
+def _gui_correctness_measured(manifest: Mapping[str, object]) -> bool:
+    final_evaluation = manifest.get("final_evaluation")
+    if not isinstance(final_evaluation, Mapping):
+        return False
+    required = (
+        "gui_action_name_match_rate",
+        "gui_action_records",
+        "gui_median_coordinate_error",
+        "gui_coordinate_records",
+    )
+    if any(name not in final_evaluation for name in required):
+        return False
+    try:
+        return (
+            float(final_evaluation["gui_action_records"]) > 0
+            and float(final_evaluation["gui_coordinate_records"]) > 0
+        )
+    except (TypeError, ValueError):
+        return False
 
 
 def _accepted(
@@ -95,6 +98,7 @@ def _accepted(
     *,
     require_gui_recovery: bool = False,
     require_tail_protected_lineage: bool = False,
+    require_gui_correctness: bool = False,
 ) -> bool:
     manifest = path / "distillation-manifest.json"
     if not manifest.is_file():
@@ -104,14 +108,11 @@ def _accepted(
         return False
     if require_tail_protected_lineage and not _tail_protected_lineage(path):
         return False
+    if require_gui_correctness and not _gui_correctness_measured(value):
+        return False
     if not require_gui_recovery:
         return True
 
-    # Legacy structural recovery could be accepted after evaluating only the
-    # broad text corpus. The corrected recovery mix always contributes held-out
-    # gui_policy records, and evaluation reserves a GUI quota. Require evidence
-    # of that regime before reusing the final structural checkpoint; otherwise
-    # --resume would silently skip the very 24 -> 20 recovery being repaired.
     if str(value.get("stage") or "") != "recovery":
         return False
     final_evaluation = value.get("final_evaluation")
@@ -153,10 +154,6 @@ def _require_recovery_corpora(plan: Mapping[str, object]) -> None:
         if not path.is_file():
             missing.append(f"{name}: {path}")
             continue
-        # Existence is not enough. Stage A has to rebuild general language
-        # ability, and the whole redesign rests on this corpus being broad; a
-        # truncated or half-written file would quietly reproduce the v1 failure
-        # after the GPU bill has already been incurred.
         minimum = int(raw.get("min_records", 0))
         if minimum <= 0:
             continue
@@ -201,6 +198,13 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         raise FileNotFoundError(
             f"required predecessor checkpoint is missing: {source}. Run the preceding size first."
         )
+    if source_arg.startswith("artifacts/") and args.student in {"1b", "0.5b"}:
+        if not _accepted(source, require_gui_correctness=True):
+            raise RuntimeError(
+                f"refusing to prune {args.student} from predecessor {source}: its accepted "
+                "manifest predates the grounding correctness gate or lacks measured action/coordinate "
+                "correctness. Re-evaluate/recover the predecessor before structural pruning."
+            )
 
     calibration = _calibration_path(plan, args.calibration_manifest)
     if not calibration.is_file():
@@ -234,6 +238,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                     recovered_dir,
                     require_gui_recovery=is_final_depth,
                     require_tail_protected_lineage=True,
+                    require_gui_correctness=True,
                 )
             )
             if not resume_ok:
@@ -283,14 +288,10 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                         str(args.intermediate_recovery_updates),
                     ]
                 _run(recover_command, dry_run=args.dry_run)
-                # A downstream structural checkpoint was initialized from the old
-                # predecessor, so it is not resume-compatible after this rebuild.
                 upstream_rebuilt = True
             current_source = str(recovered_dir)
             stages.append({"depth": depth, "checkpoint": str(recovered_dir)})
     else:
-        # 0.5B starts from the accepted 1.5B checkpoint and performs its final
-        # 20 -> 16 text selection together with structured width/vision pruning.
         init_dir = Path(
             str(student_entry.get("initialized") or work_root / "width-init")
         )
@@ -301,6 +302,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 recovered_dir,
                 require_gui_recovery=True,
                 require_tail_protected_lineage=True,
+                require_gui_correctness=True,
             )
         ):
             build_command = [
@@ -346,7 +348,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
 
     if not args.skip_on_policy:
         on_policy_dir = work_root / "on-policy"
-        if not (args.resume and _accepted(on_policy_dir)):
+        if not (args.resume and _accepted(on_policy_dir, require_gui_correctness=True)):
             command = [
                 sys.executable,
                 POLICY_TRAINER,
@@ -381,7 +383,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         )
     )
     if not args.skip_specialize:
-        if not (args.resume and _accepted(final)):
+        if not (args.resume and _accepted(final, require_gui_correctness=True)):
             command = [
                 sys.executable,
                 POLICY_TRAINER,
