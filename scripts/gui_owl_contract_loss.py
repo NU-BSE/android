@@ -52,22 +52,33 @@ class ContractTokenWeighter:
         self.require_marker = bool(require_marker)
         self.open_patterns = tuple(
             pattern
-            for pattern in (_token_ids(tokenizer, "\n<tool_call>"), _token_ids(tokenizer, "<tool_call>"))
+            for pattern in (
+                _token_ids(tokenizer, "\n<tool_call>{"),
+                _token_ids(tokenizer, "<tool_call>{"),
+                _token_ids(tokenizer, "\n<tool_call>"),
+                _token_ids(tokenizer, "<tool_call>"),
+            )
             if pattern
         )
         self.close_patterns = tuple(
             pattern
-            for pattern in (_token_ids(tokenizer, "</tool_call>"), _token_ids(tokenizer, "</tool_call>\n"))
+            for pattern in (
+                _token_ids(tokenizer, "}</tool_call>"),
+                _token_ids(tokenizer, "</tool_call>"),
+                _token_ids(tokenizer, "</tool_call>\n"),
+            )
             if pattern
         )
         self.focus_patterns = tuple(
             pattern
             for pattern in (
+                _token_ids(tokenizer, "<tool_call>{"),
                 _token_ids(tokenizer, "<tool_call>"),
                 _token_ids(tokenizer, '\"name\":\"mobile.'),
                 _token_ids(tokenizer, '\"arguments\":'),
                 _token_ids(tokenizer, '\"coordinate\":['),
                 _token_ids(tokenizer, '\"coordinate2\":['),
+                _token_ids(tokenizer, "}</tool_call>"),
                 _token_ids(tokenizer, "</tool_call>"),
             )
             if pattern
