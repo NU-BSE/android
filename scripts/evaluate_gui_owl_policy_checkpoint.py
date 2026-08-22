@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Evaluate free-running GUI-Owl policy syntax and save concrete generations."""
+"""Evaluate free-running GUI-Owl syntax, action identity, and screenshot grounding."""
 from __future__ import annotations
 
 import argparse
@@ -14,6 +14,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from android_drlqn.gui_owl_metrics import (  # noqa: E402
+    assistant_content_text,
+    compare_gui_outputs,
+)
 from project_gui_owl_train import parse_gui_owl_output  # noqa: E402
 
 
@@ -97,7 +101,12 @@ def evaluate(args: argparse.Namespace) -> dict[str, object]:
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     first_eos = empty = valid = 0
+    action_records = action_matches = 0
     lengths: list[int] = []
+    coordinate_errors: list[float] = []
+    coordinate_within_50 = 0
+    emitted_actions: set[str] = set()
+    generated_x: list[float] = []
 
     with output.open("w", encoding="utf-8") as handle, torch.no_grad():
         for index, record in enumerate(selected):
@@ -134,7 +143,23 @@ def evaluate(args: argparse.Namespace) -> dict[str, object]:
             parsed = bool(text and parse_gui_owl_output(text) is not None)
             if parsed:
                 valid += 1
-            target = messages[-1].get("content") if isinstance(messages[-1], Mapping) else None
+
+            target_content = messages[-1].get("content") if isinstance(messages[-1], Mapping) else None
+            target_text = assistant_content_text(target_content)
+            correctness = compare_gui_outputs(text, target_text)
+            if correctness.generated_action:
+                emitted_actions.add(correctness.generated_action)
+            if correctness.target_action:
+                action_records += 1
+                if correctness.action_match:
+                    action_matches += 1
+            if correctness.coordinate_error is not None:
+                coordinate_errors.append(float(correctness.coordinate_error))
+                if correctness.coordinate_error <= 50.0:
+                    coordinate_within_50 += 1
+            if correctness.generated_coordinate is not None:
+                generated_x.append(float(correctness.generated_coordinate[0]))
+
             row = {
                 "index": index,
                 "id": record.get("id"),
@@ -144,15 +169,22 @@ def evaluate(args: argparse.Namespace) -> dict[str, object]:
                 "first_token_eos": is_first_eos,
                 "empty": not bool(text),
                 "gui_parse_valid": parsed,
+                "target_action": correctness.target_action,
+                "generated_action": correctness.generated_action,
+                "action_name_match": correctness.action_match,
+                "target_coordinate": correctness.target_coordinate,
+                "generated_coordinate": correctness.generated_coordinate,
+                "coordinate_error": correctness.coordinate_error,
                 "has_action_prefix": text.startswith("Action:"),
                 "has_tool_call_open": "<tool_call>" in text,
                 "has_tool_call_close": "</tool_call>" in text,
                 "generation": text,
-                "target": target,
+                "target": target_text,
             }
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     total = len(selected)
+    coordinate_records = len(coordinate_errors)
     summary = {
         "checkpoint": str(checkpoint),
         "corpus": str(corpus),
@@ -161,6 +193,19 @@ def evaluate(args: argparse.Namespace) -> dict[str, object]:
         "empty_generation_rate": empty / total,
         "median_generated_tokens": float(statistics.median(lengths)),
         "gui_parse_rate": valid / total,
+        "gui_action_records": action_records,
+        "gui_action_name_match_rate": action_matches / action_records if action_records else 0.0,
+        "gui_distinct_action_types_emitted": len(emitted_actions),
+        "gui_emitted_action_types": sorted(emitted_actions),
+        "gui_coordinate_records": coordinate_records,
+        "gui_median_coordinate_error": (
+            float(statistics.median(coordinate_errors)) if coordinate_errors else 0.0
+        ),
+        "gui_coordinate_within_50_rate": (
+            coordinate_within_50 / coordinate_records if coordinate_records else 0.0
+        ),
+        "gui_generated_x_min": min(generated_x) if generated_x else None,
+        "gui_generated_x_max": max(generated_x) if generated_x else None,
         "output": str(output),
     }
     summary_path = output.with_suffix(output.suffix + ".summary.json")
@@ -183,12 +228,39 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-new-tokens", type=int, default=64)
     parser.add_argument("--holdout-fraction", type=float, default=0.05)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--min-action-name-match-rate", type=float)
+    parser.add_argument("--max-median-coordinate-error", type=float)
     args = parser.parse_args(argv)
     if args.max_records < 1 or args.max_new_tokens < 1:
         parser.error("record/token limits must be positive")
     if not 0 < args.holdout_fraction <= 1:
         parser.error("--holdout-fraction must be in (0, 1]")
-    print(json.dumps(evaluate(args), ensure_ascii=False, indent=2, sort_keys=True))
+    if args.min_action_name_match_rate is not None and not 0 <= args.min_action_name_match_rate <= 1:
+        parser.error("--min-action-name-match-rate must be in [0, 1]")
+    if args.max_median_coordinate_error is not None and args.max_median_coordinate_error < 0:
+        parser.error("--max-median-coordinate-error must be non-negative")
+
+    summary = evaluate(args)
+    print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
+    failures: list[str] = []
+    if (
+        args.min_action_name_match_rate is not None
+        and float(summary["gui_action_name_match_rate"]) < args.min_action_name_match_rate
+    ):
+        failures.append(
+            f"action-name match {summary['gui_action_name_match_rate']:.4f} < "
+            f"{args.min_action_name_match_rate:.4f}"
+        )
+    if args.max_median_coordinate_error is not None:
+        if int(summary["gui_coordinate_records"]) <= 0:
+            failures.append("coordinate error unmeasured: no coordinate-bearing targets")
+        elif float(summary["gui_median_coordinate_error"]) > args.max_median_coordinate_error:
+            failures.append(
+                f"median coordinate error {summary['gui_median_coordinate_error']:.2f} > "
+                f"{args.max_median_coordinate_error:.2f}"
+            )
+    if failures:
+        raise SystemExit("GUI correctness gate failed: " + "; ".join(failures))
     return 0
 
 
