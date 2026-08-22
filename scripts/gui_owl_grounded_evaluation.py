@@ -41,6 +41,7 @@ def evaluate_generation(base, **kwargs) -> dict[str, object]:
     ce_values: list[float] = []
     kl_values: list[float] = []
     gui_total = gui_valid = 0
+    gui_action_prefix = gui_tool_open = gui_tool_close = 0
     gui_action_records = gui_action_matches = 0
     coordinate_errors: list[float] = []
     coordinate_within_50 = 0
@@ -97,6 +98,12 @@ def evaluate_generation(base, **kwargs) -> dict[str, object]:
                 if record.mode != "gui_policy":
                     continue
                 gui_total += 1
+                if text.startswith("Action:"):
+                    gui_action_prefix += 1
+                if "<tool_call>" in text:
+                    gui_tool_open += 1
+                if "</tool_call>" in text:
+                    gui_tool_close += 1
                 if text and parse_gui_owl_output(text) is not None:
                     gui_valid += 1
 
@@ -129,6 +136,9 @@ def evaluate_generation(base, **kwargs) -> dict[str, object]:
         "mean_supervised_ce": sum(ce_values) / len(ce_values),
         "mean_teacher_kl": sum(kl_values) / len(kl_values),
         "gui_records": float(gui_total),
+        "gui_action_prefix_rate": gui_action_prefix / gui_total if gui_total else 0.0,
+        "gui_tool_call_open_rate": gui_tool_open / gui_total if gui_total else 0.0,
+        "gui_tool_call_close_rate": gui_tool_close / gui_total if gui_total else 0.0,
         "gui_parse_rate": gui_valid / gui_total if gui_total else 0.0,
         "gui_action_records": float(gui_action_records),
         "gui_action_name_match_rate": (
