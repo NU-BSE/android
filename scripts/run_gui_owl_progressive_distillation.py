@@ -26,13 +26,12 @@ else:
     from normalize_gui_owl_calibration import normalize_manifest
 
 
-RECOVERY_TRAINER = "scripts/distill_gui_owl_student.py"
-# The policy stages run through the repair entrypoint. It replaces the base
-# K3 term -- whose plain torch.clamp has derivative 0 outside the delta clip,
-# so the tokens furthest from the teacher, which is exactly the GUI grammar,
-# received no gradient at all -- and adds the first-token/prefix teacher
-# forcing weights. Recovery stays on the base trainer: its k3_weight is 0, and
-# it is broad-corpus KD that should not be first-token weighted.
+RECOVERY_TRAINER = "scripts/distill_gui_owl_grounded.py"
+# Policy stages keep the K3/first-token repair entrypoint. Structural recovery
+# uses the base losses but must share the same action/coordinate correctness
+# evaluator, so it runs through the grounded wrapper rather than the bare base
+# trainer. That prevents a syntactically valid center-tap policy from becoming
+# a structural predecessor.
 POLICY_TRAINER = "scripts/distill_gui_owl_policy_aligned.py"
 
 
