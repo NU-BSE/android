@@ -1,18 +1,10 @@
 #!/usr/bin/env python3
 """Run GUI-Owl distillation with policy-alignment safeguards.
 
-This entrypoint keeps the base trainer/checkpoint format but fixes three details
-that matter when a compressed student has collapsed to first-token EOS on GUI
-prompts:
-
-* generation evaluation is stratified so GUI policy records receive a material
-  share of the holdout budget;
-* K3 clips its delta value with a straight-through clamp so badly mismatched
-  sampled tokens still receive a bounded, non-zero gradient instead of falling
-  outside ``torch.clamp`` and getting zero gradient;
-* teacher-forced CE/KL upweight the first completion token, because recovery of
-  ``Action:`` must happen before free-running generation can ever reach the
-  remaining tool-call tokens.
+This entrypoint keeps the base trainer/checkpoint format but fixes details that
+matter after structural compression: GUI-stratified evaluation, live-gradient
+K3 clipping, first-token teacher forcing, and target-based action/coordinate
+correctness metrics so syntactically valid center-tap policies cannot pass.
 
 Set ``GUI_OWL_ONLY_GUI=1`` for the short syntax bridge to train only on the
 GUI-policy corpus; later on-policy/final stages can use the normal corpus mix.
@@ -29,8 +21,14 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts import distill_gui_owl_student as base  # noqa: E402
+from scripts.gui_owl_grounded_evaluation import evaluate_generation as _grounded_evaluate  # noqa: E402
 
-_BASE_EVALUATE = base._evaluate_generation
+
+def _base_grounded_evaluate(**kwargs):
+    return _grounded_evaluate(base, **kwargs)
+
+
+_BASE_EVALUATE = _base_grounded_evaluate
 _BASE_STAGE_SOURCES = base._stage_sources
 MIN_GUI_EVAL_RECORDS = 8
 
@@ -64,9 +62,6 @@ def _stratified_evaluate_generation(**kwargs):
     if not gui:
         return _BASE_EVALUATE(**kwargs)
 
-    # Reserve at least eight GUI examples where available and otherwise use up
-    # to half the evaluation budget. This keeps EOS/CE/KL metrics mixed while
-    # making the GUI parse-rate gate statistically meaningful.
     gui_quota = min(
         len(gui),
         max_records,
@@ -245,12 +240,6 @@ def _sampled_k3_with_live_clipped_gradient(
 
     raw_delta = teacher_log_probs - student_log_probs
     clipped_delta = raw_delta.clamp(min=-float(delta_clip), max=float(delta_clip))
-    # Plain torch.clamp has derivative 0 outside the interval. In the observed
-    # EOS collapse, teacher log p(EOS) - student log p(EOS) can be far below -5,
-    # so the old implementation assigned exactly zero K3 gradient to the token
-    # that most needed correction. Keep the bounded forward value but route the
-    # derivative through raw_delta. The resulting K3 derivative is itself
-    # bounded by the clipped exponential.
     delta = raw_delta + (clipped_delta - raw_delta).detach()
     k3 = torch_module.exp(delta) - delta - 1.0
     return k3.mean(), int(response_ids.numel())
