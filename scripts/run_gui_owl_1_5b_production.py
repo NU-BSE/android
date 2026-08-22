@@ -28,6 +28,7 @@ from typing import Mapping, Sequence
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+os.chdir(ROOT)
 
 from android_drlqn.gui_owl_student import resolve_peft_adapter_dir  # noqa: E402
 
@@ -45,6 +46,9 @@ SEMANTIC_COORD_MAX = 100.0
 CONTRACT_OPEN_MIN = 0.90
 CONTRACT_CLOSE_MIN = 0.80
 CONTRACT_PARSE_MIN = 0.65
+EOS_RATE_MAX = 0.05
+EMPTY_RATE_MAX = 0.05
+MEDIAN_TOKENS_MIN = 8.0
 
 
 def _read_json(path: Path) -> dict[str, object]:
@@ -134,9 +138,9 @@ def _production_config(base_path: Path, output: Path, *, bootstrap: bool) -> dic
             }
         )
         recovery["generation_gate"] = {
-            "first_token_eos_rate_max": 0.05,
-            "empty_generation_rate_max": 0.05,
-            "median_generated_tokens_min": 8,
+            "first_token_eos_rate_max": EOS_RATE_MAX,
+            "empty_generation_rate_max": EMPTY_RATE_MAX,
+            "median_generated_tokens_min": MEDIAN_TOKENS_MIN,
             "gui_parse_rate_min": SEMANTIC_PARSE_MIN,
             "gui_action_name_match_rate_min": SEMANTIC_ACTION_MIN,
             "gui_median_coordinate_error_max": SEMANTIC_COORD_MAX,
@@ -196,9 +200,9 @@ def _production_config(base_path: Path, output: Path, *, bootstrap: bool) -> dic
             }
         )
         gate = {
-            "first_token_eos_rate_max": 0.05,
-            "empty_generation_rate_max": 0.05,
-            "median_generated_tokens_min": 8,
+            "first_token_eos_rate_max": EOS_RATE_MAX,
+            "empty_generation_rate_max": EMPTY_RATE_MAX,
+            "median_generated_tokens_min": MEDIAN_TOKENS_MIN,
             "gui_parse_rate_min": SEMANTIC_PARSE_MIN,
             "gui_action_name_match_rate_min": SEMANTIC_ACTION_MIN,
             "gui_median_coordinate_error_max": SEMANTIC_COORD_MAX,
@@ -255,13 +259,28 @@ def _checkpoint_metrics(checkpoint: Path) -> dict[str, object] | None:
 def _semantic_metrics_pass(metrics: Mapping[str, object]) -> bool:
     try:
         return (
-            float(metrics.get("gui_parse_rate", 0.0)) >= SEMANTIC_PARSE_MIN
+            float(metrics.get("first_token_eos_rate", 1.0)) <= EOS_RATE_MAX
+            and float(metrics.get("empty_generation_rate", 1.0)) <= EMPTY_RATE_MAX
+            and float(metrics.get("median_generated_tokens", 0.0)) >= MEDIAN_TOKENS_MIN
+            and float(metrics.get("gui_parse_rate", 0.0)) >= SEMANTIC_PARSE_MIN
             and float(metrics.get("gui_action_name_match_rate", 0.0)) >= SEMANTIC_ACTION_MIN
             and float(metrics.get("gui_coordinate_records", 0.0)) > 0
             and float(metrics.get("gui_median_coordinate_error", float("inf"))) <= SEMANTIC_COORD_MAX
         )
     except (TypeError, ValueError):
         return False
+
+
+def _periodic_checkpoint_pass(checkpoint: Path) -> bool:
+    periodic = checkpoint / "checkpoint-metrics.json"
+    if not periodic.is_file():
+        return False
+    value = _read_json(periodic)
+    failures = value.get("gate_failures")
+    if not isinstance(failures, Sequence) or isinstance(failures, (str, bytes)) or len(failures) != 0:
+        return False
+    metrics = value.get("metrics")
+    return isinstance(metrics, Mapping) and _semantic_metrics_pass(metrics)
 
 
 def _semantic_checkpoint(output: Path) -> Path | None:
@@ -274,8 +293,7 @@ def _semantic_checkpoint(output: Path) -> Path | None:
         best = str(value.get("best_checkpoint") or "").strip()
         if best:
             best_path = Path(best)
-            best_metrics = _checkpoint_metrics(best_path)
-            if best_metrics is not None and _semantic_metrics_pass(best_metrics):
+            if _periodic_checkpoint_pass(best_path):
                 return best_path
     return None
 
@@ -530,9 +548,12 @@ def _evaluate_final(candidate: Path, work: Path, device: str, log: Path) -> dict
         log=log,
     )
     summary = _read_json(Path(str(output) + ".summary.json"))
-    if float(summary.get("gui_parse_rate", 0.0)) < SEMANTIC_PARSE_MIN:
+    if not _semantic_metrics_pass(summary):
         raise RuntimeError(
-            f"independent final GUI parse gate failed: {summary.get('gui_parse_rate')} < {SEMANTIC_PARSE_MIN}"
+            "independent final generation gate failed: "
+            f"eos={summary.get('first_token_eos_rate')} empty={summary.get('empty_generation_rate')} "
+            f"tokens={summary.get('median_generated_tokens')} parse={summary.get('gui_parse_rate')} "
+            f"action={summary.get('gui_action_name_match_rate')} coord={summary.get('gui_median_coordinate_error')}"
         )
     return summary
 
@@ -555,10 +576,17 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     logs = work / "logs"
     candidate_output = work / "final"
     production_config, bootstrap_config = _write_configs(config, work, candidate_output)
+    try:
+        git_head = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=str(ROOT), text=True
+        ).strip()
+    except (OSError, subprocess.SubprocessError):
+        git_head = None
 
     state: dict[str, object] = {
         "schema_version": 1,
         "revision": "contract-first-grounding-v2",
+        "git_head": git_head,
         "run_tag": tag,
         "work_root": str(work),
         "teacher": TEACHER,
