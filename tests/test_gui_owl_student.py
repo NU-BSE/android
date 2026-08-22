@@ -149,15 +149,18 @@ def test_generation_gate_catches_eos_collapse_even_with_good_ce():
     assert not any("mean_supervised_ce" in value for value in failures)
 
 
-def test_tail_protection_keeps_the_final_blocks_saliency_would_drop():
+def test_tail_protection_is_scaled_before_small_depth_coverage_selection():
     scores = [10.0, 0.9, 0.8, 0.7, 0.6, 0.5] + [0.1, 0.1, 0.1, 0.1]
     source = tuple(range(10))
 
     unprotected = select_salient_layer_ids(scores, source, 6)
     assert unprotected == (0, 1, 2, 3, 4, 9)
 
+    # Even a caller requesting four protected tail blocks is capped to the
+    # depth-6 policy of two. Coverage then keeps interior representation.
     protected = select_salient_layer_ids(scores, source, 6, protect_tail=4)
-    assert protected == (0, 1, 6, 7, 8, 9)
+    assert protected == (0, 1, 2, 4, 8, 9)
+    assert {8, 9}.issubset(protected)
 
 
 def test_scaled_tail_does_not_consume_small_depth_budget():
@@ -171,8 +174,6 @@ def test_scaled_tail_does_not_consume_small_depth_budget():
 
 def test_depth_6_selection_cannot_collapse_to_first_plus_last_five():
     source = tuple(range(28))
-    # Deliberately make the tail overwhelmingly salient: coverage must still
-    # reserve interior slots instead of reproducing [0,23,24,25,26,27].
     scores = [1.0] * 23 + [1000.0 + index for index in range(5)]
     selected = select_salient_layer_ids(
         scores,
@@ -218,10 +219,10 @@ def test_stale_depth_6_recommendation_cannot_bypass_coverage_guard():
     assert text_layer_selection_is_safe(source, selected)
 
 
-def test_tail_protection_prefers_blocks_nearest_the_output_when_depth_is_tight():
+def test_tail_request_is_capped_when_depth_is_tight():
     scores = [10.0] + [0.1] * 9
     source = tuple(range(10))
-    assert select_salient_layer_ids(scores, source, 3, protect_tail=4) == (0, 8, 9)
+    assert select_salient_layer_ids(scores, source, 3, protect_tail=4) == (0, 1, 9)
     with pytest.raises(ValueError, match="protect_tail"):
         select_salient_layer_ids(scores, source, 3, protect_tail=-1)
 
