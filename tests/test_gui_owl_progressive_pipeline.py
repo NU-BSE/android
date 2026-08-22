@@ -15,6 +15,7 @@ from scripts.run_gui_owl_progressive_distillation import (
     POLICY_TRAINER,
     RECOVERY_TRAINER,
     _accepted,
+    _tail_protected_lineage,
 )
 
 
@@ -22,14 +23,9 @@ def _plan() -> dict[str, object]:
     return load_student_plan("config/gui_owl_students.json")
 
 
-def test_policy_stages_run_through_the_repair_entrypoint():
-    # The base K3 term clamps the delta with plain torch.clamp, whose gradient
-    # is 0 outside the interval, so the GUI tokens furthest from the teacher --
-    # the ones on_policy exists to correct -- got no gradient. The repair lives
-    # in the policy-aligned entrypoint, which the runner must therefore use for
-    # the policy stages while recovery stays on the base trainer.
+def test_all_training_stages_run_through_correctness_aware_entrypoints():
     assert POLICY_TRAINER == "scripts/distill_gui_owl_policy_aligned.py"
-    assert RECOVERY_TRAINER == "scripts/distill_gui_owl_student.py"
+    assert RECOVERY_TRAINER == "scripts/distill_gui_owl_grounded.py"
 
     source = Path("scripts/run_gui_owl_progressive_distillation.py").read_text(encoding="utf-8")
     for stage in ('"on_policy"', '"specialize"'):
@@ -38,8 +34,7 @@ def test_policy_stages_run_through_the_repair_entrypoint():
         invocation = head.rsplit("POLICY_TRAINER", 1)
         assert len(invocation) == 2, f"{stage} must be launched with POLICY_TRAINER"
         assert "RECOVERY_TRAINER" not in invocation[1], stage
-    # Only the constant may name a trainer path; every launch goes through it.
-    assert source.count('"scripts/distill_gui_owl_student.py"') == 1
+    assert source.count('"scripts/distill_gui_owl_grounded.py"') == 1
     assert source.count('"scripts/distill_gui_owl_policy_aligned.py"') == 1
 
 
@@ -56,6 +51,8 @@ def test_plan_replaces_one_epoch_distillation_with_update_stages():
         assert float(gate["first_token_eos_rate_max"]) <= 0.05
         assert float(gate["empty_generation_rate_max"]) <= 0.05
         assert float(gate["median_generated_tokens_min"]) >= 8
+        assert float(gate["gui_action_name_match_rate_min"]) >= 0.70
+        assert float(gate["gui_median_coordinate_error_max"]) <= 100.0
 
 
 def test_recovery_requires_broad_data_and_on_policy_uses_k3():
@@ -66,8 +63,6 @@ def test_recovery_requires_broad_data_and_on_policy_uses_k3():
     assert recovery["path"].endswith("gui-owl-recovery.jsonl")
     assert float(plan["stages"]["recovery"]["k3_weight"]) == 0.0
     assert float(plan["stages"]["on_policy"]["k3_weight"]) > 0.0
-    # K3 must be able to observe and penalize a sampled first-token EOS rather
-    # than forcing the student to continue for several tokens.
     assert int(plan["stages"]["on_policy"]["on_policy_min_new_tokens"]) == 0
 
 
@@ -127,8 +122,6 @@ def test_grouped_query_pruning_keeps_query_heads_with_their_kv_head():
 
 
 def test_compact_vision_keeps_source_deepstack_blocks_at_matching_target_taps():
-    # Make high-saliency non-deepstack layers compete for every free slot. The
-    # source taps 5/11/17 must still be retained exactly at compact 2/5/8.
     scores = [float((index * 17) % 23) for index in range(24)]
     selected = deepstack_aligned_vision_selection(scores)
     assert len(selected) == 12
@@ -159,8 +152,6 @@ def test_resume_only_accepts_generation_gated_checkpoint(tmp_path: Path):
 
 
 def test_final_recovery_resume_requires_gui_evidence(tmp_path: Path):
-    """Do not let --resume skip the repaired 24 -> 20 recovery with a legacy manifest."""
-
     checkpoint = tmp_path / "depth-20-recovered"
     checkpoint.mkdir()
     manifest = checkpoint / "distillation-manifest.json"
@@ -181,14 +172,52 @@ def test_final_recovery_resume_requires_gui_evidence(tmp_path: Path):
     assert _accepted(checkpoint, require_gui_recovery=True) is True
 
 
+def test_resume_requires_measured_action_and_coordinate_correctness(tmp_path: Path):
+    checkpoint = tmp_path / "accepted"
+    checkpoint.mkdir()
+    manifest = checkpoint / "distillation-manifest.json"
+    legacy = {
+        "accepted": True,
+        "stage": "specialize",
+        "final_evaluation": {"gui_records": 16.0, "gui_parse_rate": 0.984},
+    }
+    manifest.write_text(json.dumps(legacy), encoding="utf-8")
+    assert _accepted(checkpoint) is True
+    assert _accepted(checkpoint, require_gui_correctness=True) is False
+
+    grounded = {
+        **legacy,
+        "final_evaluation": {
+            **legacy["final_evaluation"],
+            "gui_action_records": 16.0,
+            "gui_action_name_match_rate": 0.75,
+            "gui_coordinate_records": 10.0,
+            "gui_median_coordinate_error": 42.0,
+        },
+    }
+    manifest.write_text(json.dumps(grounded), encoding="utf-8")
+    assert _accepted(checkpoint, require_gui_correctness=True) is True
+
+
+def test_sparse_depth_6_lineage_is_not_resume_safe(tmp_path: Path):
+    checkpoint = tmp_path / "depth-6-recovered"
+    checkpoint.mkdir()
+    unsafe = {
+        "source_text_original_layer_ids": list(range(28)),
+        "text_original_layer_ids": [0, 23, 24, 25, 26, 27],
+    }
+    (checkpoint / "compression-lineage.json").write_text(json.dumps(unsafe), encoding="utf-8")
+    assert _tail_protected_lineage(checkpoint) is False
+
+    safe = {
+        "source_text_original_layer_ids": list(range(28)),
+        "text_original_layer_ids": [0, 5, 10, 16, 26, 27],
+    }
+    (checkpoint / "compression-lineage.json").write_text(json.dumps(safe), encoding="utf-8")
+    assert _tail_protected_lineage(checkpoint) is True
+
+
 def test_k3_delta_clip_bounds_the_exponential_loss_term():
-    """K3 is exp(delta) - delta - 1, so the clip bounds the loss exponentially.
-
-    A clip of 20 admits terms near exp(20) ~ 4.9e8, where a single token the
-    teacher strongly prefers dictates the update direction; grad clipping caps
-    the step length but not where it points.
-    """
-
     import math
 
     clip = float(_plan()["stages"]["on_policy"]["k3_delta_clip"])
@@ -197,8 +226,6 @@ def test_k3_delta_clip_bounds_the_exponential_loss_term():
 
 
 def _plan_with_corpora(tmp_path: Path, plan: dict[str, object]) -> dict[str, object]:
-    """Point the plan's corpora at real temp files so source selection can run."""
-
     record = '{"messages": [{"role": "user", "content": "hi"}]}\n'
     plan = json.loads(json.dumps(plan))
     for group in ("recovery_corpora", "specialized_corpora"):
@@ -210,30 +237,30 @@ def _plan_with_corpora(tmp_path: Path, plan: dict[str, object]) -> dict[str, obj
     return plan
 
 
-def test_depth_20_recovery_mixes_broad_and_multimodal_sources(tmp_path: Path):
+def test_1_5b_and_1b_recovery_mix_broad_and_multimodal_sources(tmp_path: Path):
     from scripts.distill_gui_owl_student import _stage_sources
 
     plan = _plan_with_corpora(tmp_path, _plan())
     recovery = plan["stages"]["recovery"]
     assert recovery["include_specialized"] is False
-
     specialized = set(plan["specialized_corpora"])
-    student = plan["students"]["1.5b"]
-    assert student["recovery_include_specialized"] is True
-    sources = _stage_sources(
-        plan,
-        "recovery",
-        recovery,
-        student_entry=student,
-        vision_trainable=False,
-    )
-    names = {source.name for source in sources}
-    assert specialized.issubset(names)
-    assert "broad_instruction_multimodal" in names
-    assert any(source.text_only for source in sources)
-    assert any(not source.text_only for source in sources)
 
-    # Stage C remains specialized-only.
+    for student_name in ("1.5b", "1b"):
+        student = plan["students"][student_name]
+        assert student["recovery_include_specialized"] is True
+        sources = _stage_sources(
+            plan,
+            "recovery",
+            recovery,
+            student_entry=student,
+            vision_trainable=False,
+        )
+        names = {source.name for source in sources}
+        assert specialized.issubset(names)
+        assert "broad_instruction_multimodal" in names
+        assert any(source.text_only for source in sources)
+        assert any(not source.text_only for source in sources)
+
     stage_c = {
         source.name
         for source in _stage_sources(plan, "specialize", plan["stages"]["specialize"])
@@ -258,8 +285,6 @@ def test_text_stack_refuses_a_text_only_recovery_mix_even_with_frozen_vision(tmp
 
 
 def test_trainable_vision_refuses_a_text_only_recovery_mix(tmp_path: Path):
-    """A pruned, unfrozen vision tower also requires multimodal recovery data."""
-
     import pytest
 
     from scripts.distill_gui_owl_student import _stage_sources
@@ -274,12 +299,9 @@ def test_trainable_vision_refuses_a_text_only_recovery_mix(tmp_path: Path):
             vision_trainable=True,
         )
 
-    # Keep the current paid change scoped to 1.5B. 0.5B already opted in
-    # because it trains vision; 1B will fail the generic text-stack guard until
-    # its recovery diet is reviewed separately.
     assert plan["students"]["1.5b"]["recovery_include_specialized"] is True
+    assert plan["students"]["1b"]["recovery_include_specialized"] is True
     assert plan["students"]["0.5b"]["recovery_include_specialized"] is True
-    assert "recovery_include_specialized" not in plan["students"]["1b"]
     assert plan["students"]["0.5b"]["freeze_vision_during_kd"] is False
     sources = _stage_sources(
         plan,
@@ -294,8 +316,6 @@ def test_trainable_vision_refuses_a_text_only_recovery_mix(tmp_path: Path):
 
 
 def test_recovery_guard_rejects_a_truncated_corpus(tmp_path: Path):
-    """Existence is not enough: a half-written corpus must not start a paid run."""
-
     import pytest
 
     from scripts.run_gui_owl_progressive_distillation import _require_recovery_corpora
