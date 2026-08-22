@@ -212,12 +212,12 @@ TEXT_TAIL_PROTECTED_LAYERS = 6
 Six tail blocks are necessary around the 20-layer regime that fixed the EOS
 collapse, but treating six as a constant at every target depth is pathological:
 at depth 6 it consumes five slots in addition to the first boundary and yields
-maps such as [0, 23, 24, 25, 26, 27].  Production selection therefore scales
+maps such as [0, 23, 24, 25, 26, 27]. Production selection therefore scales
 the protected tail with target depth while keeping six as the upper bound.
 """
 
 TEXT_COVERAGE_BALANCED_MAX_DEPTH = 12
-"""At or below this depth, reserve every free slot for a different source span."""
+"""At or below this depth, enforce an explicit maximum original-layer gap."""
 
 TEXT_LAYER_GAP_FACTOR = 1.75
 """Maximum small-depth gap relative to ideal even spacing, before inherited gaps."""
@@ -257,7 +257,7 @@ def text_layer_gap_limit(source_layer_ids: Sequence[int], target_layers: int) ->
 
     The bound never demands a gap smaller than one already present in the
     recovered predecessor, because a nested selector cannot reintroduce layers
-    removed upstream.  It does prevent later stages from creating a new giant
+    removed upstream. It does prevent later stages from creating a new giant
     hole such as the 23-layer depth-6 gap.
     """
 
@@ -301,6 +301,67 @@ def text_layer_selection_is_safe(
     return True
 
 
+def _coverage_constrained_saliency_selection(
+    source: tuple[int, ...],
+    score_by_id: Mapping[int, float],
+    target_layers: int,
+    required: set[int],
+    gap_limit: int,
+) -> tuple[int, ...]:
+    """Maximize saliency subject to exact depth, required IDs, and max gap.
+
+    Production text pruning protects both source boundaries, so the dynamic
+    program starts at the first source block and ends at the last. Transitions
+    may not jump over another required block. With at most 28 source layers and
+    target depth at most 12 this O(K*N^2) search is negligible compared with
+    loading a checkpoint and gives an actual coverage guarantee rather than a
+    heuristic bucket preference.
+    """
+
+    if source[0] not in required or source[-1] not in required:
+        raise ValueError("coverage-constrained selection requires protected boundaries")
+    required_positions = {
+        index for index, layer_id in enumerate(source) if layer_id in required
+    }
+    # (source_position, selected_count) -> (saliency_sum, selected_original_ids)
+    dp: dict[tuple[int, int], tuple[float, tuple[int, ...]]] = {
+        (0, 1): (score_by_id[source[0]], (source[0],))
+    }
+    for end in range(1, len(source)):
+        for count in range(2, target_layers + 1):
+            best: tuple[float, tuple[int, ...]] | None = None
+            for previous in range(end):
+                state = dp.get((previous, count - 1))
+                if state is None:
+                    continue
+                if source[end] - source[previous] > gap_limit:
+                    continue
+                if any(pos in required_positions for pos in range(previous + 1, end)):
+                    continue
+                candidate_path = state[1] + (source[end],)
+                candidate = (state[0] + score_by_id[source[end]], candidate_path)
+                if best is None:
+                    best = candidate
+                    continue
+                if candidate[0] > best[0] or (
+                    candidate[0] == best[0] and candidate[1] < best[1]
+                ):
+                    best = candidate
+            if best is not None:
+                dp[(end, count)] = best
+
+    result = dp.get((len(source) - 1, target_layers))
+    if result is None:
+        raise RuntimeError(
+            "no small-depth text-layer map satisfies the required tail/boundary "
+            f"layers and max gap {gap_limit}"
+        )
+    selected = result[1]
+    if not required.issubset(set(selected)):
+        raise RuntimeError("coverage-constrained selection dropped a required layer")
+    return selected
+
+
 def select_salient_layer_ids(
     scores: Mapping[object, object] | Sequence[object],
     source_layer_ids: Sequence[int],
@@ -313,9 +374,11 @@ def select_salient_layer_ids(
 
     ``source_layer_ids`` is the lineage of the current checkpoint. Returning
     original IDs rather than current positions keeps repeated progressive
-    reductions stable across intermediate checkpoints. At depths <= 12 the
-    unprotected slots are chosen from separate contiguous source spans, so
-    saliency cannot concentrate every remaining block in one region.
+    reductions stable across intermediate checkpoints. A requested tail count
+    is treated as a maximum and automatically scaled down with target depth, so
+    legacy callers that still pass ``protect_tail=6`` cannot recreate the
+    depth-6 [0,23,24,25,26,27] pathology. At depth <=12, selection maximizes
+    saliency subject to an explicit max-gap coverage constraint.
     """
 
     source = tuple(int(value) for value in source_layer_ids)
@@ -335,42 +398,41 @@ def select_salient_layer_ids(
 
     if protect_tail < 0:
         raise ValueError("protect_tail must not be negative")
+    effective_tail = min(protect_tail, protected_text_tail_layers(target_layers))
 
     keep: set[int] = set()
     if protect_boundaries:
         keep.add(source[0])
         if target_layers > 1:
             keep.add(source[-1])
-    # Nearest the output first, so the scaled tail preserves the blocks closest
-    # to the head without consuming the whole budget at small depths.
-    for layer_id in reversed(source[len(source) - protect_tail :] if protect_tail else ()):
+    for layer_id in reversed(source[len(source) - effective_tail :] if effective_tail else ()):
         if len(keep) >= target_layers:
             break
         keep.add(layer_id)
 
-    remaining_slots = target_layers - len(keep)
-    if remaining_slots > 0 and target_layers <= TEXT_COVERAGE_BALANCED_MAX_DEPTH:
-        candidates = [layer_id for layer_id in source if layer_id not in keep]
-        if len(candidates) < remaining_slots:
-            raise RuntimeError("insufficient unprotected layers for coverage-balanced selection")
-        for slot in range(remaining_slots):
-            start = slot * len(candidates) // remaining_slots
-            end = (slot + 1) * len(candidates) // remaining_slots
-            bucket = candidates[start:end]
-            if not bucket:
-                raise RuntimeError("coverage-balanced layer bucket is empty")
-            keep.add(min(bucket, key=lambda layer_id: (-score_by_id[layer_id], layer_id)))
+    gap_limit = text_layer_gap_limit(source, target_layers)
+    if (
+        gap_limit is not None
+        and protect_boundaries
+        and target_layers <= TEXT_COVERAGE_BALANCED_MAX_DEPTH
+    ):
+        result = _coverage_constrained_saliency_selection(
+            source,
+            score_by_id,
+            target_layers,
+            keep,
+            gap_limit,
+        )
     else:
         ranked = sorted(source, key=lambda layer_id: (-score_by_id[layer_id], layer_id))
         for layer_id in ranked:
             if len(keep) >= target_layers:
                 break
             keep.add(layer_id)
+        if len(keep) != target_layers:
+            raise RuntimeError("failed to select the requested number of layers")
+        result = tuple(sorted(keep))
 
-    if len(keep) != target_layers:
-        raise RuntimeError("failed to select the requested number of layers")
-    result = tuple(sorted(keep))
-    gap_limit = text_layer_gap_limit(source, target_layers)
     if gap_limit is not None:
         max_gap = max((b - a for a, b in zip(result, result[1:])), default=0)
         if max_gap > gap_limit:
