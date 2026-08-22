@@ -5,8 +5,8 @@ from dataclasses import dataclass
 import pytest
 
 from android_drlqn.gui_owl_metrics import parse_tool_call
-from scripts.gui_owl_grounding_revision import (
-    balance_gui_action_records,
+from scripts.gui_owl_grounding_revision import balance_gui_action_records
+from scripts.gui_owl_grounding_structural import (
     select_salient_layer_ids,
     text_layer_gap_limit,
     text_layer_selection_is_safe,
@@ -68,6 +68,17 @@ def test_selection_preserves_prefix_and_coverage_at_24_and_20():
     depth20 = select_salient_layer_ids(scores, depth24, 20, protect_tail=6)
     assert depth20[:3] == (0, 1, 2)
     assert text_layer_selection_is_safe(depth24, depth20)
+
+
+def test_depth6_gap_expands_only_to_anchor_feasible_minimum():
+    scores = [float(index + 1) for index in range(28)]
+    depth12 = select_salient_layer_ids(scores, tuple(range(28)), 12, protect_tail=4)
+    depth9 = select_salient_layer_ids(scores, depth12, 9, protect_tail=3)
+    depth6 = select_salient_layer_ids(scores, depth9, 6, protect_tail=2)
+    assert depth6[:3] == (0, 1, 2)
+    assert depth6[-2:] == (26, 27)
+    assert text_layer_gap_limit(depth9, 6) >= 12
+    assert text_layer_selection_is_safe(depth9, depth6)
 
 
 def test_missing_visual_integration_prefix_is_fail_closed():
