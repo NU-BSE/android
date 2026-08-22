@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -83,6 +84,8 @@ class GenerationGate:
     mean_teacher_kl_max: float | None = None
     mean_supervised_ce_max: float | None = None
     gui_parse_rate_min: float | None = None
+    gui_action_name_match_rate_min: float | None = None
+    gui_median_coordinate_error_max: float | None = None
 
     def __post_init__(self) -> None:
         probabilities = (
@@ -99,6 +102,16 @@ class GenerationGate:
             raise ValueError("supervised CE gate must be non-negative")
         if self.gui_parse_rate_min is not None and not 0 <= self.gui_parse_rate_min <= 1:
             raise ValueError("GUI parse-rate gate must be in [0, 1]")
+        if (
+            self.gui_action_name_match_rate_min is not None
+            and not 0 <= self.gui_action_name_match_rate_min <= 1
+        ):
+            raise ValueError("GUI action-name match gate must be in [0, 1]")
+        if (
+            self.gui_median_coordinate_error_max is not None
+            and self.gui_median_coordinate_error_max < 0
+        ):
+            raise ValueError("GUI coordinate-error gate must be non-negative")
 
 
 DEFAULT_STUDENT_SPECS: dict[str, StudentSpec] = {
@@ -194,15 +207,98 @@ def _score_sequence(scores: Mapping[object, object] | Sequence[object]) -> dict[
 
 
 TEXT_TAIL_PROTECTED_LAYERS = 6
-"""Final text blocks retained regardless of saliency.
+"""Maximum final text blocks retained regardless of saliency.
 
-Activation-energy saliency ranks the last blocks before the output layer low
-(0.16-0.22 against 0.28-0.42 for the middle of the stack), so the unconstrained
-selection drops them first.  Removing them collapses the next-token
-distribution onto `<|im_end|>` at exactly the position a structured tool call
-must open: a depth-16 text stack built without this protection scores 0.99
-top-1 mass and 0.09 entropy there, against 0.14 and 5.79 with it.
+Six tail blocks are necessary around the 20-layer regime that fixed the EOS
+collapse, but treating six as a constant at every target depth is pathological:
+at depth 6 it consumes five slots in addition to the first boundary and yields
+maps such as [0, 23, 24, 25, 26, 27].  Production selection therefore scales
+the protected tail with target depth while keeping six as the upper bound.
 """
+
+TEXT_COVERAGE_BALANCED_MAX_DEPTH = 12
+"""At or below this depth, reserve every free slot for a different source span."""
+
+TEXT_LAYER_GAP_FACTOR = 1.75
+"""Maximum small-depth gap relative to ideal even spacing, before inherited gaps."""
+
+
+def protected_text_tail_layers(target_layers: int) -> int:
+    """Scale tail protection to roughly 30% of the target, capped at six blocks."""
+
+    if target_layers < 1:
+        raise ValueError("target layer count must be positive")
+    return min(TEXT_TAIL_PROTECTED_LAYERS, max(1, (3 * target_layers + 9) // 10))
+
+
+def protected_text_layer_ids(
+    source_layer_ids: Sequence[int], target_layers: int
+) -> set[int]:
+    """Return boundary and scaled-tail IDs that a structural map must retain."""
+
+    source = tuple(int(value) for value in source_layer_ids)
+    if not source or tuple(sorted(source)) != source or len(set(source)) != len(source):
+        raise ValueError("source layer IDs must be unique, monotonic, and non-empty")
+    if not 1 <= target_layers <= len(source):
+        raise ValueError("target layer count must fit inside source depth")
+    keep: set[int] = {source[0]}
+    if target_layers > 1:
+        keep.add(source[-1])
+    protect_tail = protected_text_tail_layers(target_layers)
+    for layer_id in reversed(source[len(source) - protect_tail :]):
+        if len(keep) >= target_layers:
+            break
+        keep.add(layer_id)
+    return keep
+
+
+def text_layer_gap_limit(source_layer_ids: Sequence[int], target_layers: int) -> int | None:
+    """Return a fail-closed max original-layer gap for small target depths.
+
+    The bound never demands a gap smaller than one already present in the
+    recovered predecessor, because a nested selector cannot reintroduce layers
+    removed upstream.  It does prevent later stages from creating a new giant
+    hole such as the 23-layer depth-6 gap.
+    """
+
+    source = tuple(int(value) for value in source_layer_ids)
+    if target_layers > TEXT_COVERAGE_BALANCED_MAX_DEPTH or target_layers <= 1:
+        return None
+    if len(source) < target_layers or tuple(sorted(source)) != source:
+        raise ValueError("target layer count must fit inside a monotonic source")
+    inherited = max((b - a for a, b in zip(source, source[1:])), default=1)
+    span = max(1, source[-1] - source[0])
+    ideal = span / max(1, target_layers - 1)
+    return max(inherited, int(math.ceil(ideal * TEXT_LAYER_GAP_FACTOR)))
+
+
+def text_layer_selection_is_safe(
+    source_layer_ids: Sequence[int], selected_layer_ids: Sequence[int]
+) -> bool:
+    """Validate scaled tail protection and coverage for a nested structural map."""
+
+    source = tuple(int(value) for value in source_layer_ids)
+    selected = tuple(int(value) for value in selected_layer_ids)
+    if not source or not selected or len(selected) > len(source):
+        return False
+    if tuple(sorted(source)) != source or tuple(sorted(selected)) != selected:
+        return False
+    if len(set(source)) != len(source) or len(set(selected)) != len(selected):
+        return False
+    if not set(selected).issubset(set(source)):
+        return False
+    try:
+        required = protected_text_layer_ids(source, len(selected))
+        gap_limit = text_layer_gap_limit(source, len(selected))
+    except ValueError:
+        return False
+    if not required.issubset(set(selected)):
+        return False
+    if gap_limit is not None:
+        max_gap = max((b - a for a, b in zip(selected, selected[1:])), default=0)
+        if max_gap > gap_limit:
+            return False
+    return True
 
 
 def select_salient_layer_ids(
@@ -215,9 +311,11 @@ def select_salient_layer_ids(
 ) -> tuple[int, ...]:
     """Choose a nested subset of original layer IDs by calibration saliency.
 
-    ``source_layer_ids`` is the lineage of the current checkpoint.  Returning
+    ``source_layer_ids`` is the lineage of the current checkpoint. Returning
     original IDs rather than current positions keeps repeated progressive
-    reductions stable across intermediate checkpoints.
+    reductions stable across intermediate checkpoints. At depths <= 12 the
+    unprotected slots are chosen from separate contiguous source spans, so
+    saliency cannot concentrate every remaining block in one region.
     """
 
     source = tuple(int(value) for value in source_layer_ids)
@@ -243,20 +341,43 @@ def select_salient_layer_ids(
         keep.add(source[0])
         if target_layers > 1:
             keep.add(source[-1])
-    # Nearest the output first, so a target depth too small to hold the whole
-    # protected tail still keeps the blocks closest to the head.
+    # Nearest the output first, so the scaled tail preserves the blocks closest
+    # to the head without consuming the whole budget at small depths.
     for layer_id in reversed(source[len(source) - protect_tail :] if protect_tail else ()):
         if len(keep) >= target_layers:
             break
         keep.add(layer_id)
-    ranked = sorted(source, key=lambda layer_id: (-score_by_id[layer_id], layer_id))
-    for layer_id in ranked:
-        if len(keep) >= target_layers:
-            break
-        keep.add(layer_id)
+
+    remaining_slots = target_layers - len(keep)
+    if remaining_slots > 0 and target_layers <= TEXT_COVERAGE_BALANCED_MAX_DEPTH:
+        candidates = [layer_id for layer_id in source if layer_id not in keep]
+        if len(candidates) < remaining_slots:
+            raise RuntimeError("insufficient unprotected layers for coverage-balanced selection")
+        for slot in range(remaining_slots):
+            start = slot * len(candidates) // remaining_slots
+            end = (slot + 1) * len(candidates) // remaining_slots
+            bucket = candidates[start:end]
+            if not bucket:
+                raise RuntimeError("coverage-balanced layer bucket is empty")
+            keep.add(min(bucket, key=lambda layer_id: (-score_by_id[layer_id], layer_id)))
+    else:
+        ranked = sorted(source, key=lambda layer_id: (-score_by_id[layer_id], layer_id))
+        for layer_id in ranked:
+            if len(keep) >= target_layers:
+                break
+            keep.add(layer_id)
+
     if len(keep) != target_layers:
         raise RuntimeError("failed to select the requested number of layers")
-    return tuple(sorted(keep))
+    result = tuple(sorted(keep))
+    gap_limit = text_layer_gap_limit(source, target_layers)
+    if gap_limit is not None:
+        max_gap = max((b - a for a, b in zip(result, result[1:])), default=0)
+        if max_gap > gap_limit:
+            raise RuntimeError(
+                f"small-depth layer selection has max gap {max_gap} > allowed {gap_limit}: {result}"
+            )
+    return result
 
 
 def source_positions_for_layer_ids(
@@ -483,8 +604,6 @@ def generation_gate_failures(
                 f"mean_supervised_ce={value:.4f} > {gate.mean_supervised_ce_max:.4f}"
             )
     if gate.gui_parse_rate_min is not None:
-        # A stage that gates on GUI syntax but evaluated no GUI record has not
-        # passed anything: fail loudly instead of accepting an unmeasured rate.
         measured = metrics.get("gui_records")
         if measured is not None and float(measured) <= 0:
             failures.append(
@@ -495,6 +614,28 @@ def generation_gate_failures(
             value = number("gui_parse_rate")
             if value < gate.gui_parse_rate_min:
                 failures.append(f"gui_parse_rate={value:.4f} < {gate.gui_parse_rate_min:.4f}")
+    if gate.gui_action_name_match_rate_min is not None:
+        measured = number("gui_action_records")
+        if measured <= 0:
+            failures.append("gui_action_name_match_rate is unmeasured: no parseable target actions")
+        else:
+            value = number("gui_action_name_match_rate")
+            if value < gate.gui_action_name_match_rate_min:
+                failures.append(
+                    f"gui_action_name_match_rate={value:.4f} < "
+                    f"{gate.gui_action_name_match_rate_min:.4f}"
+                )
+    if gate.gui_median_coordinate_error_max is not None:
+        measured = number("gui_coordinate_records")
+        if measured <= 0:
+            failures.append("gui_median_coordinate_error is unmeasured: no coordinate targets")
+        else:
+            value = number("gui_median_coordinate_error")
+            if value > gate.gui_median_coordinate_error_max:
+                failures.append(
+                    f"gui_median_coordinate_error={value:.2f} > "
+                    f"{gate.gui_median_coordinate_error_max:.2f}"
+                )
     return tuple(failures)
 
 
@@ -503,6 +644,9 @@ __all__ = [
     "DEFAULT_STUDENT_SPECS",
     "GenerationGate",
     "StudentSpec",
+    "TEXT_COVERAGE_BALANCED_MAX_DEPTH",
+    "TEXT_LAYER_GAP_FACTOR",
+    "TEXT_TAIL_PROTECTED_LAYERS",
     "build_student_config_dict",
     "evenly_spaced_layer_map",
     "expand_head_indices",
@@ -511,6 +655,8 @@ __all__ = [
     "generation_gate_failures",
     "load_calibration_manifest",
     "load_student_plan",
+    "protected_text_layer_ids",
+    "protected_text_tail_layers",
     "ranked_indices",
     "relative_parameter_error",
     "resolve_peft_adapter_dir",
@@ -518,4 +664,6 @@ __all__ = [
     "source_positions_for_layer_ids",
     "spec_from_plan",
     "teacher_key_for_student",
+    "text_layer_gap_limit",
+    "text_layer_selection_is_safe",
 ]
