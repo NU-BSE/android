@@ -1,0 +1,202 @@
+x-runtime: &runtime
+  build:
+    context: .
+    dockerfile: Dockerfile.train
+  image: android-gui-owl-train:local
+  working_dir: /workspace
+  volumes:
+    - .:/workspace
+    - hf-cache:/cache/huggingface
+    - torch-cache:/cache/torch
+  environment:
+    HF_TOKEN: ${HF_TOKEN:-}
+    HUGGING_FACE_HUB_TOKEN: ${HF_TOKEN:-}
+    DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+    DASHSCOPE_BASE_URL: ${DASHSCOPE_BASE_URL:-https://dashscope-intl.aliyuncs.com/compatible-mode/v1}
+    PYTHONUNBUFFERED: "1"
+    TOKENIZERS_PARALLELISM: "false"
+
+x-gpu-runtime: &gpu-runtime
+  <<: *runtime
+  ipc: host
+  shm_size: "16gb"
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: 1
+            capabilities: [gpu]
+
+services:
+  shell:
+    <<: *runtime
+    command: ["bash"]
+    stdin_open: true
+    tty: true
+
+  gpu-shell:
+    <<: *gpu-runtime
+    command: ["bash"]
+    stdin_open: true
+    tty: true
+
+  prepare-unigui:
+    <<: *runtime
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+      HUGGING_FACE_HUB_TOKEN: ${HF_TOKEN:-}
+      UNIGUI_REVISION: ${UNIGUI_REVISION:-}
+      UNIGUI_APP: ${UNIGUI_APP:-settings}
+    command:
+      - bash
+      - -lc
+      - |
+        set -euo pipefail
+        args=(
+          --app "$${UNIGUI_APP}"
+          --output artifacts/training/gui-policy-unigui-openmobile.jsonl
+        )
+        if [[ -n "$${UNIGUI_REVISION}" ]]; then
+          args+=(--revision "$${UNIGUI_REVISION}")
+        fi
+        python scripts/prepare_unigui_gui_policy.py "$${args[@]}"
+
+  generate-chat:
+    <<: *runtime
+    command:
+      - python
+      - scripts/generate_qwen_screen_chat.py
+      - --input
+      - artifacts/training/gui-policy-unigui-openmobile.jsonl
+      - --output
+      - artifacts/training/chat-screen-qa-qwen.jsonl
+      - --model
+      - qwen3.7-plus
+      - --questions-per-screen
+      - "4"
+      - --resume
+
+  train-gui:
+    <<: *gpu-runtime
+    command:
+      - python
+      - scripts/train_gui_owl_adapter.py
+      - --adapter
+      - gui_policy
+      - --device
+      - cuda
+      - --output
+      - artifacts/adapters/gui_policy
+
+  train-gui-smoke:
+    <<: *gpu-runtime
+    command:
+      - python
+      - scripts/train_gui_owl_adapter.py
+      - --adapter
+      - gui_policy
+      - --device
+      - cuda
+      - --max-records
+      - "${SMOKE_RECORDS:-8}"
+      - --output
+      - artifacts/adapters/gui_policy-smoke
+
+  train-chat:
+    <<: *gpu-runtime
+    command:
+      - python
+      - scripts/train_gui_owl_adapter.py
+      - --adapter
+      - chat
+      - --device
+      - cuda
+      - --output
+      - artifacts/adapters/chat
+
+  prepare-recovery:
+    <<: *runtime
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+      HUGGING_FACE_HUB_TOKEN: ${HF_TOKEN:-}
+      RECOVERY_RECORDS: ${RECOVERY_RECORDS:-50000}
+      RECOVERY_MIN_RECORDS: ${RECOVERY_MIN_RECORDS:-10000}
+    command:
+      - python
+      - scripts/prepare_gui_owl_recovery.py
+      - --max-records
+      - "${RECOVERY_RECORDS:-50000}"
+      - --min-records
+      - "${RECOVERY_MIN_RECORDS:-10000}"
+
+  calibrate-student:
+    <<: *gpu-runtime
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+      HUGGING_FACE_HUB_TOKEN: ${HF_TOKEN:-}
+      CALIBRATION_RECORDS: ${CALIBRATION_RECORDS:-64}
+    command:
+      - python
+      - scripts/calibrate_gui_owl_compression.py
+      - --device
+      - cuda
+      - --max-records-per-corpus
+      - "${CALIBRATION_RECORDS:-64}"
+
+  progressive-student:
+    <<: *gpu-runtime
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+      HUGGING_FACE_HUB_TOKEN: ${HF_TOKEN:-}
+      STUDENT_SIZE: ${STUDENT_SIZE:-1.5b}
+      DISTILL_MAX_RECORDS: ${DISTILL_MAX_RECORDS:-}
+      DISTILL_MAX_UPDATES: ${DISTILL_MAX_UPDATES:-}
+      DISTILL_INTERMEDIATE_UPDATES: ${DISTILL_INTERMEDIATE_UPDATES:-750}
+      DISTILL_RESUME: ${DISTILL_RESUME:-0}
+    command:
+      - bash
+      - -lc
+      - |
+        set -euo pipefail
+        args=(
+          --student "$${STUDENT_SIZE}"
+          --device cuda
+          --intermediate-recovery-updates "$${DISTILL_INTERMEDIATE_UPDATES}"
+        )
+        if [[ -n "$${DISTILL_MAX_RECORDS}" ]]; then
+          args+=(--max-records-per-corpus "$${DISTILL_MAX_RECORDS}")
+        fi
+        if [[ -n "$${DISTILL_MAX_UPDATES}" ]]; then
+          args+=(--max-updates "$${DISTILL_MAX_UPDATES}")
+        fi
+        if [[ "$${DISTILL_RESUME}" == "1" ]]; then
+          args+=(--resume)
+        fi
+        python scripts/run_gui_owl_progressive_distillation.py "$${args[@]}"
+
+  progressive-student-smoke:
+    <<: *gpu-runtime
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+      HUGGING_FACE_HUB_TOKEN: ${HF_TOKEN:-}
+      STUDENT_SIZE: ${STUDENT_SIZE:-1.5b}
+      DISTILL_MAX_RECORDS: ${DISTILL_MAX_RECORDS:-16}
+      DISTILL_MAX_UPDATES: ${DISTILL_MAX_UPDATES:-2}
+    command:
+      - python
+      - scripts/run_gui_owl_progressive_distillation.py
+      - --student
+      - "${STUDENT_SIZE:-1.5b}"
+      - --device
+      - cuda
+      - --max-records-per-corpus
+      - "${DISTILL_MAX_RECORDS:-16}"
+      - --max-updates
+      - "${DISTILL_MAX_UPDATES:-2}"
+      - --intermediate-recovery-updates
+      - "2"
+
+volumes:
+  hf-cache:
+  torch-cache:

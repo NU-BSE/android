@@ -18,9 +18,10 @@ from typing import Callable, Iterable, Iterator, Mapping, Sequence
 from urllib.parse import urlparse
 
 DEFAULT_MODEL = "qwen3.7-plus"
-DEFAULT_API_KEY_ENV = os.environ.get('DASHSCOPE_API_KEY')
+DEFAULT_API_KEY_ENV = "DASHSCOPE_API_KEY"
 DEFAULT_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 _ALLOWED_INTENTS = {"find", "open", "understand", "confirm"}
+_ALLOWED_INTENTS_TEXT = "find, open, understand, confirm"
 _FORBIDDEN = (
     "adb shell",
     "shell command",
@@ -50,7 +51,9 @@ class ScreenQA:
     intent: str
 
 
-Transport = Callable[[str, Mapping[str, str], Mapping[str, object], float], Mapping[str, object]]
+Transport = Callable[
+    [str, Mapping[str, str], Mapping[str, object], float], Mapping[str, object]
+]
 
 
 def _default_transport(
@@ -81,7 +84,9 @@ def _endpoint(base_url: str) -> str:
     if not (host == "aliyuncs.com" or host.endswith(".aliyuncs.com")):
         raise ValueError("Qwen API host must be an Alibaba Cloud aliyuncs.com host")
     if parsed.query or parsed.fragment or parsed.username or parsed.password:
-        raise ValueError("Qwen API base URL must not contain credentials, query or fragment")
+        raise ValueError(
+            "Qwen API base URL must not contain credentials, query or fragment"
+        )
     suffix = "/chat/completions"
     return base if parsed.path.endswith(suffix) else base + suffix
 
@@ -114,15 +119,30 @@ def screen_prompt(
         "automation, policy APIs, or settings-provider writes. Answers should be "
         "brief, friendly, and describe manual navigation or what the screen means. "
         f"Write in {language}. Return exactly one JSON object with this schema: "
-        '{"items":[{"question":"...","answer":"...",'
-        '"intent":"find|open|understand|confirm"}]}. '
-        f"Return exactly {count} items.\n"
+        '{"items":[{"question":"non-empty string","answer":"non-empty string",'
+        '"intent":"find"}]}. '
+        f"Return exactly {count} items. Every question and answer must be a non-empty "
+        "JSON string. Every intent must be exactly one of these lowercase JSON "
+        f"strings: {_ALLOWED_INTENTS_TEXT}. Do not use null, an empty string, or a "
+        "synonym for any field.\n"
         f"OS family: {context.os_family}\n"
         f"Package: {context.package}\n"
         f"Screen: {context.screen_name}\n"
         f"Exploration goal: {context.goal or 'not supplied'}\n"
         f"Documented UI path: {route}\n"
         f"Visible labels: {labels}"
+    )
+
+
+def _repair_prompt(error: BaseException, *, count: int) -> str:
+    reason = _clean_text(error, max_chars=300)
+    return (
+        "The previous JSON object failed validation: "
+        f"{reason}. Return a completely new JSON object with exactly {count} items. "
+        "Each item must contain exactly question, answer, and intent. Question and "
+        "answer must be non-empty JSON strings. Intent must be exactly one of: "
+        f"{_ALLOWED_INTENTS_TEXT}. Do not return nulls, empty strings, synonyms, "
+        "markdown, or any fields outside the schema."
     )
 
 
@@ -141,7 +161,9 @@ class QwenScreenQAClient:
     ) -> None:
         self.model = str(model or DEFAULT_MODEL)
         self.api_key_env = str(api_key_env or DEFAULT_API_KEY_ENV)
-        self.base_url = str(base_url or os.getenv("DASHSCOPE_BASE_URL") or DEFAULT_BASE_URL)
+        self.base_url = str(
+            base_url or os.getenv("DASHSCOPE_BASE_URL") or DEFAULT_BASE_URL
+        )
         self.endpoint = _endpoint(self.base_url)
         self.timeout_s = float(timeout_s)
         self.max_retries = int(max_retries)
@@ -160,34 +182,53 @@ class QwenScreenQAClient:
     ) -> tuple[ScreenQA, ...]:
         api_key = os.getenv(self.api_key_env)
         if not api_key:
-            raise RuntimeError(f"missing Qwen API key environment variable: {self.api_key_env}")
-        payload: dict[str, object] = {
-            "model": self.model,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "You create concise, factual Android settings chat examples. "
-                        "Return JSON only and never provide executable automation."
-                    ),
-                },
-                {"role": "user", "content": screen_prompt(context, count=count, language=language)},
-            ],
-            "response_format": {"type": "json_object"},
-            "enable_thinking": False,
-            "temperature": 0.7,
-            "max_tokens": 1600,
-        }
+            raise RuntimeError(
+                f"missing Qwen API key environment variable: {self.api_key_env}"
+            )
+        base_messages: list[dict[str, str]] = [
+            {
+                "role": "system",
+                "content": (
+                    "You create concise, factual Android settings chat examples. "
+                    "Return JSON only and never provide executable automation."
+                ),
+            },
+            {
+                "role": "user",
+                "content": screen_prompt(context, count=count, language=language),
+            },
+        ]
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
         last_error: BaseException | None = None
         for attempt in range(self.max_retries + 1):
+            messages = list(base_messages)
+            if last_error is not None:
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": _repair_prompt(last_error, count=count),
+                    }
+                )
+            payload: dict[str, object] = {
+                "model": self.model,
+                "messages": messages,
+                "response_format": {"type": "json_object"},
+                "enable_thinking": False,
+                "temperature": 0.2,
+            }
             try:
                 raw = self.transport(self.endpoint, headers, payload, self.timeout_s)
                 return self._parse(raw, expected_count=count)
-            except (urllib.error.URLError, TimeoutError, ValueError, KeyError, TypeError) as exc:
+            except (
+                urllib.error.URLError,
+                TimeoutError,
+                ValueError,
+                KeyError,
+                TypeError,
+            ) as exc:
                 last_error = exc
                 if attempt >= self.max_retries:
                     break
@@ -195,9 +236,15 @@ class QwenScreenQAClient:
         raise RuntimeError(f"Qwen screen-QA generation failed: {last_error}")
 
     @staticmethod
-    def _parse(raw: Mapping[str, object], *, expected_count: int) -> tuple[ScreenQA, ...]:
+    def _parse(
+        raw: Mapping[str, object], *, expected_count: int
+    ) -> tuple[ScreenQA, ...]:
         choices = raw.get("choices")
-        if not isinstance(choices, Sequence) or isinstance(choices, (str, bytes)) or not choices:
+        if (
+            not isinstance(choices, Sequence)
+            or isinstance(choices, (str, bytes))
+            or not choices
+        ):
             raise ValueError("Qwen response has no choices")
         first = choices[0]
         if not isinstance(first, Mapping):
@@ -215,37 +262,57 @@ class QwenScreenQAClient:
         if not isinstance(items, Sequence) or isinstance(items, (str, bytes)):
             raise ValueError("Qwen items must be an array")
         if len(items) != expected_count:
-            raise ValueError("Qwen returned the wrong number of items")
+            raise ValueError(
+                f"Qwen returned the wrong number of items: "
+                f"expected {expected_count}, got {len(items)}"
+            )
         output: list[ScreenQA] = []
         seen: set[tuple[str, str]] = set()
-        for item in items:
-            if not isinstance(item, Mapping) or set(item) != {"question", "answer", "intent"}:
-                raise ValueError("each Qwen item must match the closed schema")
+        for index, item in enumerate(items):
+            if not isinstance(item, Mapping) or set(item) != {
+                "question",
+                "answer",
+                "intent",
+            }:
+                raise ValueError(
+                    f"Qwen item {index} must contain exactly question, answer, intent"
+                )
             question = _clean_text(item["question"], max_chars=500)
             answer = _clean_text(item["answer"], max_chars=1200)
             intent = _clean_text(item["intent"], max_chars=32).casefold()
-            if not question or not answer or intent not in _ALLOWED_INTENTS:
-                raise ValueError("Qwen item has empty text or unsupported intent")
+            if not question:
+                raise ValueError(f"Qwen item {index} question is empty")
+            if not answer:
+                raise ValueError(f"Qwen item {index} answer is empty")
+            if intent not in _ALLOWED_INTENTS:
+                raise ValueError(
+                    f"Qwen item {index} intent {intent!r} is unsupported; "
+                    f"expected one of {_ALLOWED_INTENTS_TEXT}"
+                )
             _assert_safe(question)
             _assert_safe(answer)
             key = (question.casefold(), answer.casefold())
             if key in seen:
-                raise ValueError("Qwen returned a duplicate item")
+                raise ValueError(f"Qwen item {index} duplicates an earlier item")
             seen.add(key)
             output.append(ScreenQA(question, answer, intent))
         return tuple(output)
 
 
 def load_screen_contexts(path: str | Path) -> Iterator[ScreenContext]:
-    """Read screen metadata from the prepared MobileForge GUI-policy JSONL."""
+    """Read screen metadata from a prepared GUI-policy JSONL corpus."""
     source = Path(path)
-    for line_number, line in enumerate(source.read_text(encoding="utf-8").splitlines(), 1):
+    for line_number, line in enumerate(
+        source.read_text(encoding="utf-8").splitlines(), 1
+    ):
         if not line.strip():
             continue
         value = json.loads(line)
         if not isinstance(value, Mapping):
             raise ValueError(f"{source}:{line_number}: record must be an object")
-        screen_id = _clean_text(value.get("id") or value.get("screen_id"), max_chars=128)
+        screen_id = _clean_text(
+            value.get("id") or value.get("screen_id"), max_chars=128
+        )
         package = _clean_text(value.get("package"), max_chars=200)
         screen_name = _clean_text(value.get("screen_name"), max_chars=300)
         goal = _clean_text(value.get("goal"), max_chars=1000)
@@ -262,9 +329,19 @@ def load_screen_contexts(path: str | Path) -> Iterator[ScreenContext]:
             package=package,
             screen_name=screen_name,
             goal=goal,
-            visible_labels=tuple(_clean_text(item, max_chars=200) for item in visible if _clean_text(item, max_chars=200)),
-            ui_path=tuple(_clean_text(item, max_chars=200) for item in route if _clean_text(item, max_chars=200)),
-            os_family=_clean_text(value.get("os_family") or "android", max_chars=100),
+            visible_labels=tuple(
+                _clean_text(item, max_chars=200)
+                for item in visible
+                if _clean_text(item, max_chars=200)
+            ),
+            ui_path=tuple(
+                _clean_text(item, max_chars=200)
+                for item in route
+                if _clean_text(item, max_chars=200)
+            ),
+            os_family=_clean_text(
+                value.get("os_family") or "android", max_chars=100
+            ),
         )
 
 

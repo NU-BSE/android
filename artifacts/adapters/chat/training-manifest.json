@@ -1,0 +1,13 @@
+{
+  "adapter": "chat",
+  "api_credentials_written": false,
+  "base_model": "mPLUG/GUI-Owl-1.5-2B-Instruct",
+  "data": "artifacts/training/chat-screen-qa-qwen.jsonl",
+  "device": "cuda",
+  "dtype": "bfloat16",
+  "epochs": 1,
+  "final_loss": 2.015707015991211,
+  "planned_updates": 1365,
+  "records": 10916,
+  "updates": 1365
+}

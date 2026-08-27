@@ -1,0 +1,190 @@
+{
+  "schema_version": 2,
+  "initialization_teacher": "mPLUG/GUI-Owl-1.5-2B-Instruct",
+  "teacher_adapters": {
+    "gui_policy": "artifacts/adapters/gui_policy",
+    "chat": "artifacts/adapters/chat"
+  },
+  "specialized_corpora": {
+    "gui_policy": {
+      "path": "artifacts/training/gui-policy-unigui-openmobile.jsonl",
+      "weight": 3.0
+    },
+    "chat": {
+      "path": "artifacts/training/chat-screen-qa-qwen.jsonl",
+      "weight": 1.0
+    }
+  },
+  "recovery_corpora": {
+    "broad_instruction_multimodal": {
+      "path": "artifacts/training/gui-owl-recovery.jsonl",
+      "teacher_mode": "base",
+      "weight": 2.0,
+      "required": true,
+      "min_records": 20000,
+      "text_only": true
+    }
+  },
+  "calibration": {
+    "manifest": "artifacts/calibration/gui-owl-compression.json",
+    "max_records_per_corpus": 64,
+    "selection_method": "activation_energy_and_residual_saliency"
+  },
+  "progressive": {
+    "1.5b": {
+      "source": "mPLUG/GUI-Owl-1.5-2B-Instruct",
+      "text_depth_schedule": [24, 20, 16]
+    },
+    "1b": {
+      "source": "artifacts/students/v2/gui-owl-1.5b-distilled",
+      "text_depth_schedule": [12, 9, 6]
+    },
+    "0.5b": {
+      "source": "artifacts/students/v2/gui-owl-1.5b-distilled",
+      "text_depth_schedule": [],
+      "structured_width_pruning": true,
+      "source_deepstack_visual_indexes": [5, 11, 17],
+      "target_deepstack_visual_indexes": [2, 5, 8]
+    }
+  },
+  "stages": {
+    "recovery": {
+      "temperature": 2.0,
+      "supervised_weight": 0.25,
+      "forward_kl_weight": 1.0,
+      "hidden_state_weight": 0.15,
+      "k3_weight": 0.0,
+      "learning_rate": 0.000003,
+      "max_updates": 4000,
+      "gradient_accumulation": 8,
+      "grad_clip": 1.0,
+      "weight_decay": 0.0,
+      "freeze_embeddings": true,
+      "freeze_lm_head": true,
+      "include_specialized": false,
+      "holdout_fraction": 0.05,
+      "eval_interval_updates": 250,
+      "eval_records": 32,
+      "eval_max_new_tokens": 64,
+      "generation_gate": {
+        "first_token_eos_rate_max": 0.05,
+        "empty_generation_rate_max": 0.05,
+        "median_generated_tokens_min": 8
+      }
+    },
+    "on_policy": {
+      "temperature": 2.0,
+      "supervised_weight": 0.4,
+      "forward_kl_weight": 0.3,
+      "hidden_state_weight": 0.0,
+      "k3_weight": 1.0,
+      "k3_delta_clip": 5.0,
+      "learning_rate": 0.000002,
+      "max_updates": 1500,
+      "gradient_accumulation": 8,
+      "grad_clip": 1.0,
+      "weight_decay": 0.0,
+      "freeze_embeddings": true,
+      "freeze_lm_head": true,
+      "include_specialized": true,
+      "on_policy_min_new_tokens": 0,
+      "on_policy_max_new_tokens": 64,
+      "sampling_temperature": 0.8,
+      "top_p": 0.95,
+      "holdout_fraction": 0.05,
+      "eval_interval_updates": 100,
+      "eval_records": 32,
+      "eval_max_new_tokens": 64,
+      "generation_gate": {
+        "first_token_eos_rate_max": 0.05,
+        "empty_generation_rate_max": 0.05,
+        "median_generated_tokens_min": 8,
+        "gui_parse_rate_min": 0.5
+      }
+    },
+    "specialize": {
+      "temperature": 2.0,
+      "supervised_weight": 0.5,
+      "forward_kl_weight": 0.5,
+      "hidden_state_weight": 0.05,
+      "k3_weight": 0.25,
+      "k3_delta_clip": 5.0,
+      "learning_rate": 0.000001,
+      "max_updates": 1200,
+      "gradient_accumulation": 8,
+      "grad_clip": 1.0,
+      "weight_decay": 0.0,
+      "freeze_embeddings": true,
+      "freeze_lm_head": true,
+      "on_policy_min_new_tokens": 0,
+      "on_policy_max_new_tokens": 64,
+      "sampling_temperature": 0.8,
+      "top_p": 0.95,
+      "holdout_fraction": 0.05,
+      "eval_interval_updates": 100,
+      "eval_records": 32,
+      "eval_max_new_tokens": 64,
+      "generation_gate": {
+        "first_token_eos_rate_max": 0.05,
+        "empty_generation_rate_max": 0.05,
+        "median_generated_tokens_min": 8,
+        "gui_parse_rate_min": 0.5
+      }
+    }
+  },
+  "students": {
+    "1.5b": {
+      "target_parameters": 1500000000,
+      "text_layers": 16,
+      "text_hidden_size": 2048,
+      "text_intermediate_size": 6144,
+      "text_attention_heads": 16,
+      "text_key_value_heads": 8,
+      "vision_depth": 24,
+      "vision_hidden_size": 1024,
+      "vision_intermediate_size": 4096,
+      "vision_heads": 16,
+      "deepstack_visual_indexes": [5, 11, 17],
+      "freeze_vision_during_kd": true,
+      "max_relative_parameter_error": 0.15,
+      "initialized": "artifacts/students/v2/gui-owl-1.5b-init",
+      "distilled": "artifacts/students/v2/gui-owl-1.5b-distilled"
+    },
+    "1b": {
+      "target_parameters": 1000000000,
+      "text_layers": 6,
+      "text_hidden_size": 2048,
+      "text_intermediate_size": 6144,
+      "text_attention_heads": 16,
+      "text_key_value_heads": 8,
+      "vision_depth": 24,
+      "vision_hidden_size": 1024,
+      "vision_intermediate_size": 4096,
+      "vision_heads": 16,
+      "deepstack_visual_indexes": [5, 11, 17],
+      "freeze_vision_during_kd": true,
+      "max_relative_parameter_error": 0.15,
+      "initialized": "artifacts/students/v2/gui-owl-1b-init",
+      "distilled": "artifacts/students/v2/gui-owl-1b-distilled"
+    },
+    "0.5b": {
+      "target_parameters": 500000000,
+      "text_layers": 16,
+      "text_hidden_size": 1024,
+      "text_intermediate_size": 3072,
+      "text_attention_heads": 8,
+      "text_key_value_heads": 4,
+      "vision_depth": 12,
+      "vision_hidden_size": 768,
+      "vision_intermediate_size": 3072,
+      "vision_heads": 12,
+      "deepstack_visual_indexes": [2, 5, 8],
+      "freeze_vision_during_kd": false,
+      "recovery_include_specialized": true,
+      "max_relative_parameter_error": 0.20,
+      "initialized": "artifacts/students/v2/gui-owl-0.5b-init",
+      "distilled": "artifacts/students/v2/gui-owl-0.5b-distilled",
+      "recommended_initialization_source": "artifacts/students/v2/gui-owl-1.5b-distilled"
+    }
+  }
+}

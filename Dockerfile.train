@@ -1,0 +1,49 @@
+ARG PYTORCH_IMAGE=pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+FROM ${PYTORCH_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONUNBUFFERED=1 \
+    HF_HOME=/cache/huggingface \
+    TORCH_HOME=/cache/torch \
+    TOKENIZERS_PARALLELISM=false
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        git \
+        libgl1 \
+        libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+
+# Keep the CUDA runtime and torch version from the official PyTorch image intact.
+# Torch 2.5.1 pairs with torchvision 0.20.1; install that pair explicitly instead
+# of allowing an unconstrained pip resolution to replace the CUDA-enabled torch.
+COPY pyproject.toml ./
+COPY android_drlqn ./android_drlqn
+RUN python -m pip install --upgrade pip \
+    && python -m pip install --no-cache-dir --no-deps 'torchvision==0.20.1' \
+    && python -m pip install --no-cache-dir \
+        'huggingface-hub>=0.34' \
+        'datasets>=3.0' \
+        'transformers>=4.57.1' \
+        'peft>=0.13' \
+        'safetensors>=0.4' \
+        'pillow>=10.0' \
+    && python -m pip install --no-cache-dir --no-deps . \
+    && python - <<'PY'
+import torch
+import torchvision
+print('torch', torch.__version__)
+print('torchvision', torchvision.__version__)
+print('cuda runtime', torch.version.cuda)
+PY
+
+COPY config ./config
+COPY scripts ./scripts
+
+RUN mkdir -p /workspace/artifacts /cache/huggingface /cache/torch
+
+CMD ["bash"]
