@@ -220,6 +220,7 @@ def parse_gui_owl_output(text: str) -> StudentProposal | None:
     )
     target_label = str(arguments.get("target_label") or "").strip() or None
     bbox = None
+    typed_text = None
 
     if name in {"click", "tap", "long_press"}:
         # long_press is a touch at a point like click; the proposal API has no
@@ -230,6 +231,13 @@ def parse_gui_owl_output(text: str) -> StudentProposal | None:
             bbox = _point_box(coordinate)
     elif name in {"swipe", "scroll"}:
         kind = ProposalKind.SCROLL
+    elif name == "type":
+        # The typed string is the payload, not the conclusion: keep it separate
+        # so the environment can enter it verbatim.
+        typed_text = str(arguments.get("text") or "").strip()
+        if not typed_text:
+            return None
+        kind = ProposalKind.TYPE
     elif name in {"system_button", "key"}:
         button = str(arguments.get("button") or arguments.get("key") or "").casefold()
         kind = ProposalKind.BACK if "back" in button else ProposalKind.WAIT
@@ -254,6 +262,7 @@ def parse_gui_owl_output(text: str) -> StudentProposal | None:
         action_distribution=distribution,
         log_probability=math.log(confidence),
         policy_version=0,
+        text=typed_text,
     )
 
 
@@ -278,6 +287,8 @@ def teacher_gui_owl_output(target: TeacherTarget) -> str:
         name, arguments = "mobile.system_button", {"button": "Back"}
     elif target.preferred_kind is ProposalKind.WAIT:
         name, arguments = "mobile.wait", {"seconds": 1}
+    elif target.preferred_kind is ProposalKind.TYPE:
+        name, arguments = "mobile.type", {"text": target.response}
     elif target.preferred_kind is ProposalKind.ASK_CONFIRMATION:
         name, arguments = "mobile.interact", {"text": target.response}
     else:

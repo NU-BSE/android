@@ -167,3 +167,61 @@ def test_mrpo_factory_uses_safe_student_and_updater(monkeypatch, tmp_path):
     project_gui_owl_mrpo_train.create_student({"resume": False}, tmp_path)
     assert captured["model_id"] == DEFAULT_MODEL_ID
     assert captured["checkpoint_dir"] == tmp_path / "checkpoints"
+
+
+def test_mobile_type_parses_executes_and_round_trips():
+    """mobile.type was declared by the contract but had no ProposalKind.
+
+    parse_gui_owl_output returned None for it, so a student that obeyed its
+    instructions was scored as a parse failure while a click-only student was
+    not -- 9 of 256 held-out targets on the depth-24 bootstrap.
+    """
+    from android_drlqn.distillation import ProposalKind
+    from project_gui_owl_train import (
+        TeacherTarget,
+        parse_gui_owl_output,
+        teacher_gui_owl_output,
+    )
+
+    proposal = parse_gui_owl_output(
+        'Action: I typed the network name into the field.\n'
+        '<tool_call>{"name":"mobile.type","arguments":{"text":"AndroidWifi"}}</tool_call>'
+    )
+    assert proposal is not None
+    assert proposal.kind is ProposalKind.TYPE
+    # The typed string is the payload, not the Action conclusion.
+    assert proposal.text == "AndroidWifi"
+    assert proposal.message.startswith("I typed")
+
+    # A type call with nothing to enter is not actionable.
+    assert parse_gui_owl_output(
+        'Action: x\n<tool_call>{"name":"mobile.type","arguments":{"text":"  "}}</tool_call>'
+    ) is None
+
+    serialized = teacher_gui_owl_output(
+        TeacherTarget(
+            preferred_kind=ProposalKind.TYPE,
+            target_label=None,
+            bbox_norm=None,
+            response="AndroidWifi",
+        )
+    )
+    assert '"name":"mobile.type"' in serialized
+    again = parse_gui_owl_output(serialized)
+    assert again is not None and again.kind is ProposalKind.TYPE
+    assert again.text == "AndroidWifi"
+
+
+def test_proposal_kinds_keep_distinct_leading_characters():
+    """The closed action head selects a kind by its value's first subword token.
+
+    A char-level tokenizer makes that the first character, so "type" would have
+    collided with "tap"; the TYPE member's value is "input_text" for that
+    reason. Appending it last also keeps every existing index stable.
+    """
+    from android_drlqn.distillation import ProposalKind
+
+    values = [kind.value for kind in ProposalKind]
+    assert len({value[0] for value in values}) == len(values)
+    assert list(ProposalKind)[-1] is ProposalKind.TYPE
+    assert ProposalKind.TYPE.value == "input_text"

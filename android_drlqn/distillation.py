@@ -28,6 +28,15 @@ class ProposalKind(str, Enum):
     WAIT = "wait"
     ASK_CONFIRMATION = "ask_confirmation"
     EXPLAIN = "explain"
+    # Appended last deliberately. list(ProposalKind).index() indexes the action
+    # distribution and the linear student's weight rows, so inserting TYPE
+    # anywhere earlier would silently remap every existing index.
+    #
+    # The value is "input_text", not "type": the closed action head selects a
+    # kind by the first subword token of its value, and "type" shares a leading
+    # "t" with "tap" under any tokenizer that splits per character. This value
+    # is internal -- the GUI contract's tool name is still mobile.type.
+    TYPE = "input_text"
 
 
 class TeacherProfile(str, Enum):
@@ -46,8 +55,15 @@ class StudentProposal:
     action_distribution: tuple[float, ...]
     log_probability: float
     policy_version: int
+    # Literal string a TYPE proposal enters; None for every other kind.
+    # Trailing and defaulted so existing positional construction is unaffected.
+    text: str | None = None
 
     def __post_init__(self) -> None:
+        # No constructor guard on TYPE carrying text: a policy that samples a
+        # kind by index legitimately produces TYPE with nothing to enter yet.
+        # parse_gui_owl_output rejects a text-less mobile.type at the parsing
+        # boundary, and the environment penalizes it at execution.
         if not 0 <= self.confidence <= 1:
             raise ValueError("proposal confidence must be in [0, 1]")
         if self.bbox_norm is not None:

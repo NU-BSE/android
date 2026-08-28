@@ -309,6 +309,21 @@ class AdbSettingsEnvironment:
             self._input("keyevent", "KEYCODE_BACK")
         elif kind is ProposalKind.SCROLL:
             self._scroll()
+        elif kind is ProposalKind.TYPE:
+            typed = (proposal.text or "").strip()
+            if not typed:
+                observation = self._observe()
+                self._last_observation = observation
+                return EnvironmentOutcome(
+                    reward=-0.05,
+                    terminal=False,
+                    verified=False,
+                    next_observation=observation,
+                    reason="type action carried no text",
+                )
+            # `adb shell input text` splits on spaces; %s is the documented
+            # escape for a literal space.
+            self._input("text", typed.replace(" ", "%s"))
         elif kind is ProposalKind.TAP:
             if (
                 manual_navigation
