@@ -221,7 +221,9 @@ def parse_gui_owl_output(text: str) -> StudentProposal | None:
     target_label = str(arguments.get("target_label") or "").strip() or None
     bbox = None
 
-    if name in {"click", "tap"}:
+    if name in {"click", "tap", "long_press"}:
+        # long_press is a touch at a point like click; the proposal API has no
+        # separate press duration, so it maps onto TAP with the same bbox.
         kind = ProposalKind.TAP
         coordinate = arguments.get("coordinate") or arguments.get("point") or ()
         if isinstance(coordinate, Sequence) and not isinstance(coordinate, (str, bytes)):
@@ -233,7 +235,7 @@ def parse_gui_owl_output(text: str) -> StudentProposal | None:
         kind = ProposalKind.BACK if "back" in button else ProposalKind.WAIT
     elif name == "wait":
         kind = ProposalKind.WAIT
-    elif name in {"interact", "ask_confirmation"}:
+    elif name in {"interact", "ask_confirmation", "ask_user"}:
         kind = ProposalKind.ASK_CONFIRMATION
     elif name in {"answer", "terminate"}:
         kind = ProposalKind.EXPLAIN

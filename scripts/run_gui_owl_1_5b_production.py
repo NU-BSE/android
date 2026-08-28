@@ -131,9 +131,9 @@ def _production_config(base_path: Path, output: Path, *, bootstrap: bool) -> dic
                 "freeze_embeddings": True,
                 "freeze_lm_head": False,
                 "freeze_vision": True,
-                "holdout_fraction": 0.05,
+                "holdout_fraction": 0.2,
                 "eval_interval_updates": 100,
-                "eval_records": 64,
+                "eval_records": 256,
                 "eval_max_new_tokens": 64,
             }
         )
@@ -163,7 +163,7 @@ def _production_config(base_path: Path, output: Path, *, bootstrap: bool) -> dic
                 "freeze_lm_head": False,
                 "freeze_vision": True,
                 "eval_interval_updates": 100,
-                "eval_records": 64,
+                "eval_records": 256,
                 "eval_max_new_tokens": 64,
             }
         )
@@ -179,7 +179,7 @@ def _production_config(base_path: Path, output: Path, *, bootstrap: bool) -> dic
                 "freeze_lm_head": True,
                 "freeze_vision": True,
                 "eval_interval_updates": 100,
-                "eval_records": 64,
+                "eval_records": 256,
                 "eval_max_new_tokens": 64,
             }
         )
@@ -195,7 +195,7 @@ def _production_config(base_path: Path, output: Path, *, bootstrap: bool) -> dic
                 "freeze_lm_head": True,
                 "freeze_vision": True,
                 "eval_interval_updates": 100,
-                "eval_records": 64,
+                "eval_records": 256,
                 "eval_max_new_tokens": 64,
             }
         )
@@ -298,6 +298,67 @@ def _semantic_checkpoint(output: Path) -> Path | None:
     return None
 
 
+def _directory_size(path: Path) -> int:
+    return sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
+
+
+def _prune_contract_chunks(root: Path, keep: set[Path]) -> int:
+    """Drop chunk weights the bootstrap can no longer reach; keep the metrics.
+
+    `--resume` replays every chunk-N metrics file and stops at the first one
+    missing, so the JSON must survive even when the weights do not.
+    """
+    freed = 0
+    for path in sorted(root.glob("chunk-*")):
+        if not path.is_dir():
+            continue
+        if path.name.endswith("-best"):
+            # Written by the trainer, never read by _bootstrap_contract.
+            freed += _directory_size(path)
+            shutil.rmtree(path, ignore_errors=True)
+            continue
+        if path in keep:
+            continue
+        for weight in path.glob("*.safetensors"):
+            freed += weight.stat().st_size
+            weight.unlink()
+    return freed
+
+
+def _require_disk(root: Path, reference: Path, chunk: int) -> None:
+    """Refuse to start a chunk that cannot fit, rather than dying mid-save."""
+    try:
+        needed = _directory_size(reference) * 2
+    except OSError:
+        return
+    free = shutil.disk_usage(root).free
+    if free < needed:
+        raise RuntimeError(
+            f"refusing to start contract chunk {chunk}: {free / 2**30:.1f}GiB free, "
+            f"~{needed / 2**30:.1f}GiB needed for the checkpoint and its best sibling. "
+            "Free space or lower --contract-max-chunks."
+        )
+
+
+def _contract_score(metrics: Mapping[str, object]) -> float:
+    """Rank chunks by distance below each contract bound, parse weighted most.
+
+    Parse is the binding constraint and the last to arrive, so it dominates;
+    open and close break ties among chunks whose parse rates are within noise.
+    """
+    try:
+        open_rate = float(metrics.get("gui_tool_call_open_rate", 0.0))
+        close_rate = float(metrics.get("gui_tool_call_close_rate", 0.0))
+        parse_rate = float(metrics.get("gui_parse_rate", 0.0))
+    except (TypeError, ValueError):
+        return float("-inf")
+    return (
+        2.0 * min(parse_rate, CONTRACT_PARSE_MIN)
+        + min(open_rate, CONTRACT_OPEN_MIN)
+        + min(close_rate, CONTRACT_CLOSE_MIN)
+    )
+
+
 def _contract_pass(metrics: Mapping[str, object]) -> bool:
     try:
         return (
@@ -380,6 +441,7 @@ def _bootstrap_contract(
 ) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     source = initial
+    best: tuple[float, Path, float, float, float] | None = None
     start_chunk = 1
 
     if resume:
@@ -396,7 +458,17 @@ def _bootstrap_contract(
             )
             if _contract_pass(metrics):
                 return checkpoint
-            source = checkpoint
+            score = _contract_score(metrics)
+            if best is None or score > best[0]:
+                best = (
+                    score,
+                    checkpoint,
+                    float(metrics.get("gui_tool_call_open_rate", 0.0)),
+                    float(metrics.get("gui_tool_call_close_rate", 0.0)),
+                    float(metrics.get("gui_parse_rate", 0.0)),
+                )
+            # Resume from the best replayed chunk, not merely the newest.
+            source = best[1]
             start_chunk = chunk + 1
 
     for chunk in range(start_chunk, max_chunks + 1):
@@ -426,6 +498,7 @@ def _bootstrap_contract(
         ]
         if max_records is not None:
             command += ["--max-records-per-corpus", str(max_records)]
+        _require_disk(root, initial, chunk)
         _stream(
             command,
             env=_stage_env(
@@ -456,8 +529,24 @@ def _bootstrap_contract(
                 "contract bootstrap failed closed: <tool_call> open rate is still below 5% "
                 "after two focused chunks; refusing to spend the rest of the training budget"
             )
-        source = checkpoint
+        score = _contract_score(metrics)
+        if best is None or score > best[0]:
+            best = (score, checkpoint, open_rate, close_rate, parse_rate)
+        # Continue from the best chunk, not the newest: the objective peaks
+        # mid-run and chaining from a regressed chunk compounds the damage.
+        source = best[1]
+        freed = _prune_contract_chunks(root, {best[1], checkpoint})
+        if freed:
+            print(f"==> pruned {freed / 2**30:.1f}GiB of superseded contract chunks")
 
+    if best is not None:
+        _, checkpoint, open_rate, close_rate, parse_rate = best
+        raise RuntimeError(
+            f"contract bootstrap did not reach open>={CONTRACT_OPEN_MIN:.0%}, "
+            f"close>={CONTRACT_CLOSE_MIN:.0%}, parse>={CONTRACT_PARSE_MIN:.0%}; "
+            f"best chunk was {checkpoint} at open={open_rate:.1%} "
+            f"close={close_rate:.1%} parse={parse_rate:.1%}"
+        )
     raise RuntimeError(
         f"contract bootstrap did not reach open>={CONTRACT_OPEN_MIN:.0%}, "
         f"close>={CONTRACT_CLOSE_MIN:.0%}, parse>={CONTRACT_PARSE_MIN:.0%}"
