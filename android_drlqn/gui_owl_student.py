@@ -86,6 +86,7 @@ class GenerationGate:
     gui_parse_rate_min: float | None = None
     gui_action_name_match_rate_min: float | None = None
     gui_median_coordinate_error_max: float | None = None
+    gui_coordinate_within_50_rate_min: float | None = None
 
     def __post_init__(self) -> None:
         probabilities = (
@@ -112,6 +113,10 @@ class GenerationGate:
             and self.gui_median_coordinate_error_max < 0
         ):
             raise ValueError("GUI coordinate-error gate must be non-negative")
+        if self.gui_coordinate_within_50_rate_min is not None and not (
+            0 <= self.gui_coordinate_within_50_rate_min <= 1
+        ):
+            raise ValueError("GUI coordinate within-50px gate must be in [0, 1]")
 
 
 DEFAULT_STUDENT_SPECS: dict[str, StudentSpec] = {
@@ -678,6 +683,24 @@ def generation_gate_failures(
                 failures.append(
                     f"gui_action_name_match_rate={value:.4f} < "
                     f"{gate.gui_action_name_match_rate_min:.4f}"
+                )
+    if gate.gui_coordinate_within_50_rate_min is not None:
+        # A proportion, unlike the median: the teacher's error distribution is
+        # bimodal (p25 3px, p50 128px, p90 619px), so its median bootstraps to a
+        # 95% CI of [28, 159]px at n=256 -- 130px of slack for an identical
+        # checkpoint. The within-50px rate over the same sample has a CI width
+        # of 0.13 and cannot swing an order of magnitude.
+        measured = number("gui_coordinate_records")
+        if measured <= 0:
+            failures.append(
+                "gui_coordinate_within_50_rate is unmeasured: no coordinate targets"
+            )
+        else:
+            value = number("gui_coordinate_within_50_rate")
+            if value < gate.gui_coordinate_within_50_rate_min:
+                failures.append(
+                    f"gui_coordinate_within_50_rate={value:.4f} < "
+                    f"{gate.gui_coordinate_within_50_rate_min:.4f}"
                 )
     if gate.gui_median_coordinate_error_max is not None:
         measured = number("gui_coordinate_records")

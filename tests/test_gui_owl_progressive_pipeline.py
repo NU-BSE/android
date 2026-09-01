@@ -51,8 +51,17 @@ def test_plan_replaces_one_epoch_distillation_with_update_stages():
         assert float(gate["first_token_eos_rate_max"]) <= 0.05
         assert float(gate["empty_generation_rate_max"]) <= 0.05
         assert float(gate["median_generated_tokens_min"]) >= 8
-        assert float(gate["gui_action_name_match_rate_min"]) >= 0.70
-        assert float(gate["gui_median_coordinate_error_max"]) <= 100.0
+        # Calibrated at 85% retention of the 2B teacher measured under the
+        # shipping contract prompt: action 0.762, within-50px 0.452, median
+        # 128.3px at n=256. The previous 0.70 / 100px came from a teacher
+        # measured under a prompt nothing ships (2.2px), and under the shipping
+        # one the teacher failed its own students' coordinate gate outright.
+        assert 0.60 <= float(gate["gui_action_name_match_rate_min"]) <= 0.70
+        # The within-50px rate is the binding coordinate gate; the median is a
+        # loose backstop because it bootstraps to a 130px-wide CI on a bimodal
+        # error distribution.
+        assert 0 < float(gate["gui_coordinate_within_50_rate_min"]) <= 0.50
+        assert float(gate["gui_median_coordinate_error_max"]) <= 200.0
 
 
 def test_recovery_requires_broad_data_and_on_policy_uses_k3():

@@ -33,18 +33,33 @@
   "progressive": {
     "1.5b": {
       "source": "mPLUG/GUI-Owl-1.5-2B-Instruct",
-      "text_depth_schedule": [24, 20]
+      "text_depth_schedule": [
+        24,
+        20
+      ]
     },
     "1b": {
       "source": "artifacts/students/v2/gui-owl-1.5b-distilled",
-      "text_depth_schedule": [12, 9, 6]
+      "text_depth_schedule": [
+        12,
+        9,
+        6
+      ]
     },
     "0.5b": {
       "source": "artifacts/students/v2/gui-owl-1.5b-distilled",
       "text_depth_schedule": [],
       "structured_width_pruning": true,
-      "source_deepstack_visual_indexes": [5, 11, 17],
-      "target_deepstack_visual_indexes": [2, 5, 8]
+      "source_deepstack_visual_indexes": [
+        5,
+        11,
+        17
+      ],
+      "target_deepstack_visual_indexes": [
+        2,
+        5,
+        8
+      ]
     }
   },
   "stages": {
@@ -54,7 +69,7 @@
       "forward_kl_weight": 1.0,
       "hidden_state_weight": 0.15,
       "k3_weight": 0.0,
-      "learning_rate": 0.000003,
+      "learning_rate": 3e-06,
       "max_updates": 4000,
       "gradient_accumulation": 8,
       "grad_clip": 1.0,
@@ -70,8 +85,9 @@
         "first_token_eos_rate_max": 0.05,
         "empty_generation_rate_max": 0.05,
         "median_generated_tokens_min": 8,
-        "gui_action_name_match_rate_min": 0.70,
-        "gui_median_coordinate_error_max": 100.0
+        "gui_action_name_match_rate_min": 0.65,
+        "gui_median_coordinate_error_max": 200.0,
+        "gui_coordinate_within_50_rate_min": 0.38
       }
     },
     "on_policy": {
@@ -81,7 +97,7 @@
       "hidden_state_weight": 0.0,
       "k3_weight": 1.0,
       "k3_delta_clip": 5.0,
-      "learning_rate": 0.000002,
+      "learning_rate": 2e-06,
       "max_updates": 1500,
       "gradient_accumulation": 8,
       "grad_clip": 1.0,
@@ -102,8 +118,9 @@
         "empty_generation_rate_max": 0.05,
         "median_generated_tokens_min": 8,
         "gui_parse_rate_min": 0.5,
-        "gui_action_name_match_rate_min": 0.70,
-        "gui_median_coordinate_error_max": 100.0
+        "gui_action_name_match_rate_min": 0.65,
+        "gui_median_coordinate_error_max": 200.0,
+        "gui_coordinate_within_50_rate_min": 0.38
       }
     },
     "specialize": {
@@ -113,7 +130,7 @@
       "hidden_state_weight": 0.05,
       "k3_weight": 0.25,
       "k3_delta_clip": 5.0,
-      "learning_rate": 0.000001,
+      "learning_rate": 1e-06,
       "max_updates": 1200,
       "gradient_accumulation": 8,
       "grad_clip": 1.0,
@@ -133,8 +150,9 @@
         "empty_generation_rate_max": 0.05,
         "median_generated_tokens_min": 8,
         "gui_parse_rate_min": 0.5,
-        "gui_action_name_match_rate_min": 0.70,
-        "gui_median_coordinate_error_max": 100.0
+        "gui_action_name_match_rate_min": 0.65,
+        "gui_median_coordinate_error_max": 200.0,
+        "gui_coordinate_within_50_rate_min": 0.38
       }
     }
   },
@@ -150,7 +168,11 @@
       "vision_hidden_size": 1024,
       "vision_intermediate_size": 4096,
       "vision_heads": 16,
-      "deepstack_visual_indexes": [5, 11, 17],
+      "deepstack_visual_indexes": [
+        5,
+        11,
+        17
+      ],
       "freeze_vision_during_kd": true,
       "recovery_include_specialized": true,
       "max_relative_parameter_error": 0.15,
@@ -168,7 +190,11 @@
       "vision_hidden_size": 1024,
       "vision_intermediate_size": 4096,
       "vision_heads": 16,
-      "deepstack_visual_indexes": [5, 11, 17],
+      "deepstack_visual_indexes": [
+        5,
+        11,
+        17
+      ],
       "freeze_vision_during_kd": true,
       "recovery_include_specialized": true,
       "max_relative_parameter_error": 0.15,
@@ -186,10 +212,14 @@
       "vision_hidden_size": 768,
       "vision_intermediate_size": 3072,
       "vision_heads": 12,
-      "deepstack_visual_indexes": [2, 5, 8],
+      "deepstack_visual_indexes": [
+        2,
+        5,
+        8
+      ],
       "freeze_vision_during_kd": false,
       "recovery_include_specialized": true,
-      "max_relative_parameter_error": 0.20,
+      "max_relative_parameter_error": 0.2,
       "initialized": "artifacts/students/v2/gui-owl-0.5b-init",
       "distilled": "artifacts/students/v2/gui-owl-0.5b-distilled",
       "recommended_initialization_source": "artifacts/students/v2/gui-owl-1.5b-distilled"

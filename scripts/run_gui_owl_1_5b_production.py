@@ -41,8 +41,15 @@ BUILDER = "scripts/build_gui_owl_student_grounded.py"
 EVALUATOR = "scripts/evaluate_gui_owl_policy_production.py"
 
 SEMANTIC_PARSE_MIN = 0.70
-SEMANTIC_ACTION_MIN = 0.70
-SEMANTIC_COORD_MAX = 100.0
+# Calibrated at 85% retention of the 2B teacher measured under the shipping
+# contract prompt, n=256 on the same 0.2 holdout and the same metric:
+# action 0.762, within-50px 0.452, median 128.3px. The previous 0.70/100.0 was
+# calibrated against a teacher measured under a prompt nothing ships, and the
+# teacher failed both of its own gates under the one that does.
+SEMANTIC_ACTION_MIN = 0.65
+SEMANTIC_WITHIN_50_MIN = 0.38
+# Loose backstop only; the within-50px rate is the binding coordinate gate.
+SEMANTIC_COORD_MAX = 200.0
 CONTRACT_OPEN_MIN = 0.90
 CONTRACT_CLOSE_MIN = 0.80
 CONTRACT_PARSE_MIN = 0.65
@@ -144,6 +151,7 @@ def _production_config(base_path: Path, output: Path, *, bootstrap: bool) -> dic
             "gui_parse_rate_min": SEMANTIC_PARSE_MIN,
             "gui_action_name_match_rate_min": SEMANTIC_ACTION_MIN,
             "gui_median_coordinate_error_max": SEMANTIC_COORD_MAX,
+            "gui_coordinate_within_50_rate_min": SEMANTIC_WITHIN_50_MIN,
         }
     else:
         recovery = stages.get("recovery")
@@ -206,6 +214,7 @@ def _production_config(base_path: Path, output: Path, *, bootstrap: bool) -> dic
             "gui_parse_rate_min": SEMANTIC_PARSE_MIN,
             "gui_action_name_match_rate_min": SEMANTIC_ACTION_MIN,
             "gui_median_coordinate_error_max": SEMANTIC_COORD_MAX,
+            "gui_coordinate_within_50_rate_min": SEMANTIC_WITHIN_50_MIN,
         }
         recovery["generation_gate"] = dict(gate)
         on_policy["generation_gate"] = dict(gate)

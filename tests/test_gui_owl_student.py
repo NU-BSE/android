@@ -328,3 +328,65 @@ def test_resolve_peft_adapter_dir_requires_adapter_config(tmp_path):
     root.mkdir()
     with pytest.raises(FileNotFoundError, match="adapter_config.json"):
         resolve_peft_adapter_dir(root, "gui_policy")
+
+
+def test_grounding_gates_are_calibrated_against_the_shipping_teacher():
+    """The gate must be reachable by the teacher the student is distilled from.
+
+    0.70 / 100px was calibrated against the teacher measured under a prompt
+    nothing ships (2.2px). Under the shipping contract the same teacher scores
+    action 0.762 and a 128.3px median over 256 records -- it failed both of its
+    own students' gates, so no student could pass without beating its teacher.
+    These are 85% retention of that measurement.
+    """
+    gate = GenerationGate(
+        gui_action_name_match_rate_min=0.65,
+        gui_median_coordinate_error_max=200.0,
+        gui_coordinate_within_50_rate_min=0.38,
+    )
+    base = {
+        "first_token_eos_rate": 0.0,
+        "empty_generation_rate": 0.0,
+        "median_generated_tokens": 41,
+        "mean_teacher_kl": 1.6,
+        "mean_supervised_ce": 1.2,
+        "gui_action_records": 256.0,
+        "gui_coordinate_records": 217.0,
+    }
+    teacher = {
+        **base,
+        "gui_action_name_match_rate": 0.762,
+        "gui_median_coordinate_error": 128.3,
+        "gui_coordinate_within_50_rate": 0.452,
+    }
+    assert not generation_gate_failures(teacher, gate)
+
+    # depth-24 recovery, same prompt: short on action and grounding alike.
+    student = {
+        **base,
+        "gui_action_name_match_rate": 0.609,
+        "gui_median_coordinate_error": 279.2,
+        "gui_coordinate_within_50_rate": 0.023,
+    }
+    failures = generation_gate_failures(student, gate)
+    assert any("gui_action_name_match_rate" in value for value in failures)
+    assert any("gui_coordinate_within_50_rate" in value for value in failures)
+
+
+def test_within_50_gate_fails_when_no_coordinate_was_measured():
+    """An unmeasured rate must not read as a perfect score.
+
+    gui_coordinate_within_50_rate is 0.0 both when every point missed and when
+    nothing was scored; gui_coordinate_records is what separates them.
+    """
+    gate = GenerationGate(gui_coordinate_within_50_rate_min=0.38)
+    metrics = {
+        "first_token_eos_rate": 0.0,
+        "empty_generation_rate": 0.0,
+        "median_generated_tokens": 41,
+        "mean_teacher_kl": 1.6,
+        "mean_supervised_ce": 1.2,
+        "gui_coordinate_records": 0.0,
+        "gui_coordinate_within_50_rate": 0.0,
+    }
+    assert any("unmeasured" in value for value in generation_gate_failures(metrics, gate))
