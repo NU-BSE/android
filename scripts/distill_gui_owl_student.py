@@ -36,6 +36,7 @@ if str(ROOT) not in sys.path:
 from android_drlqn.gui_owl_student import (
     gate_from_mapping,
     generation_gate_failures,
+    unreachable_gate_projection,
     load_student_plan,
     resolve_peft_adapter_dir,
     spec_from_plan,
@@ -998,6 +999,8 @@ def train(args: argparse.Namespace) -> dict[str, object]:
         {"update": 0, "metrics": initial_eval, "gate_failures": list(initial_failures)}
     ]
     best_score: tuple[int, float] | None = None
+    stall_reason: str | None = None
+    stall_disabled = bool(getattr(args, "no_early_stop", False))
     best_update: int | None = None
     optimizer.zero_grad(set_to_none=True)
 
@@ -1094,7 +1097,18 @@ def train(args: argparse.Namespace) -> dict[str, object]:
                     _save_checkpoint(
                         student, processor, best_output, student_dir, evaluation
                     )
-            if updates >= max_updates:
+                if not stall_disabled:
+                    stalled = unreachable_gate_projection(
+                        evaluations, gate, final_update=max_updates
+                    )
+                    if stalled is not None:
+                        stall_reason = stalled
+                        print(
+                            f"==> stopping at update {updates}/{max_updates}: {stalled}",
+                            flush=True,
+                        )
+                        break
+            if stall_reason is not None or updates >= max_updates:
                 break
 
     final_eval = _evaluate_generation(
@@ -1156,6 +1170,7 @@ def train(args: argparse.Namespace) -> dict[str, object]:
         "initial_evaluation": initial_eval,
         "initial_gate_failures": list(initial_failures),
         "evaluations": evaluations,
+        "stopped_early": stall_reason,
         "best_update": best_update,
         "best_checkpoint": str(best_output) if best_update is not None else None,
         "final_evaluation": final_eval,
@@ -1202,6 +1217,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--grad-clip", type=float)
     parser.add_argument("--max-records-per-corpus", type=int)
     parser.add_argument("--allow-gate-failure", action="store_true")
+    parser.add_argument(
+        "--no-early-stop",
+        action="store_true",
+        help="train the full budget even when no gated metric can still reach its bar",
+    )
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args(argv)
     print(json.dumps(train(args), indent=2, sort_keys=True))

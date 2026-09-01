@@ -625,6 +625,90 @@ def gate_from_mapping(value: Mapping[str, object] | None) -> GenerationGate:
     return GenerationGate(**{key: raw[key] for key in raw if key in allowed})
 
 
+# Gated metrics and the direction that counts as improvement, used to decide
+# whether a stage can still reach its gate inside its remaining budget.
+GATED_METRIC_DIRECTIONS: dict[str, tuple[str, str]] = {
+    "first_token_eos_rate_max": ("first_token_eos_rate", "max"),
+    "empty_generation_rate_max": ("empty_generation_rate", "max"),
+    "median_generated_tokens_min": ("median_generated_tokens", "min"),
+    "gui_parse_rate_min": ("gui_parse_rate", "min"),
+    "gui_action_name_match_rate_min": ("gui_action_name_match_rate", "min"),
+    "gui_median_coordinate_error_max": ("gui_median_coordinate_error", "max"),
+    "gui_coordinate_within_50_rate_min": ("gui_coordinate_within_50_rate", "min"),
+}
+
+
+def _slope(points: Sequence[tuple[float, float]]) -> float:
+    """Least-squares slope of value against update count."""
+    n = len(points)
+    if n < 2:
+        return 0.0
+    mean_x = sum(x for x, _ in points) / n
+    mean_y = sum(y for _, y in points) / n
+    denominator = sum((x - mean_x) ** 2 for x, _ in points)
+    if denominator <= 0:
+        return 0.0
+    return sum((x - mean_x) * (y - mean_y) for x, y in points) / denominator
+
+
+def unreachable_gate_projection(
+    history: Sequence[Mapping[str, object]],
+    gate: GenerationGate,
+    *,
+    final_update: int,
+    window: int = 5,
+    slack: float = 2.0,
+) -> str | None:
+    """Say which gate the observed trend cannot reach by `final_update`.
+
+    Depth-24 recovery reached the best-constant-guess coordinate error in its
+    first 100 updates and then held it for 1700 more:
+    gui_coordinate_within_50_rate sat at 0.000-0.009 against a 0.38 bar for the
+    whole run. Projecting the recent trend forward catches that in a few
+    evaluations instead of a full stage.
+
+    `slack` multiplies the projected remaining gain, so a stage is only called
+    unreachable when it would miss even at several times its observed rate.
+    Returns None when every gated metric is reachable, or when there is not yet
+    enough history to judge.
+    """
+    if len(history) < window:
+        return None
+    recent = list(history)[-window:]
+    for field, (metric, direction) in GATED_METRIC_DIRECTIONS.items():
+        bound = getattr(gate, field, None)
+        if bound is None:
+            continue
+        points: list[tuple[float, float]] = []
+        for entry in recent:
+            metrics = entry.get("metrics")
+            update = entry.get("update")
+            if isinstance(metrics, Mapping) and metric in metrics and update is not None:
+                try:
+                    points.append((float(update), float(metrics[metric])))
+                except (TypeError, ValueError):
+                    return None
+        if len(points) < window:
+            continue
+        current = points[-1][1]
+        remaining = final_update - points[-1][0]
+        if remaining <= 0:
+            continue
+        gain = _slope(points) * remaining * slack
+        projected = current + gain
+        if direction == "min" and projected < float(bound):
+            return (
+                f"{metric}={current:.4f} projects to {projected:.4f} by update "
+                f"{final_update}, below the {float(bound):.4f} gate"
+            )
+        if direction == "max" and projected > float(bound):
+            return (
+                f"{metric}={current:.4f} projects to {projected:.4f} by update "
+                f"{final_update}, above the {float(bound):.4f} gate"
+            )
+    return None
+
+
 def generation_gate_failures(
     metrics: Mapping[str, object], gate: GenerationGate
 ) -> tuple[str, ...]:
@@ -723,7 +807,9 @@ __all__ = [
     "StudentSpec",
     "TEXT_COVERAGE_BALANCED_MAX_DEPTH",
     "TEXT_LAYER_GAP_FACTOR",
+    "GATED_METRIC_DIRECTIONS",
     "TEXT_TAIL_PROTECTED_LAYERS",
+    "unreachable_gate_projection",
     "build_student_config_dict",
     "evenly_spaced_layer_map",
     "expand_head_indices",

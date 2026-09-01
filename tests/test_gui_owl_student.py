@@ -16,6 +16,7 @@ from android_drlqn.gui_owl_student import (
     relative_parameter_error,
     resolve_peft_adapter_dir,
     select_salient_layer_ids,
+    unreachable_gate_projection,
     source_positions_for_layer_ids,
     teacher_key_for_student,
     text_layer_gap_limit,
@@ -390,3 +391,72 @@ def test_within_50_gate_fails_when_no_coordinate_was_measured():
         "gui_coordinate_within_50_rate": 0.0,
     }
     assert any("unmeasured" in value for value in generation_gate_failures(metrics, gate))
+
+
+def _history(trajectory, *names):
+    rows = []
+    for point in trajectory:
+        metrics = {
+            "first_token_eos_rate": 0.0,
+            "empty_generation_rate": 0.0,
+            "median_generated_tokens": 35,
+        }
+        metrics.update(dict(zip(names, point[1:])))
+        rows.append({"update": point[0], "metrics": metrics})
+    return rows
+
+
+def test_stall_detection_catches_the_depth24_recovery_plateau():
+    """The real trajectory that burned 1700 updates for nothing.
+
+    depth-24 recovery reached the best-constant-guess coordinate error inside
+    100 updates and held it for the rest of the stage:
+    gui_coordinate_within_50_rate sat at 0.000-0.009 against a 0.38 bar for all
+    1800 updates. The projection must call that before the budget is spent.
+    """
+    gate = GenerationGate(
+        gui_action_name_match_rate_min=0.65,
+        gui_coordinate_within_50_rate_min=0.38,
+    )
+    observed = [
+        (0, 0.398, 0.000), (100, 0.516, 0.009), (200, 0.531, 0.000),
+        (300, 0.547, 0.009), (400, 0.555, 0.000), (500, 0.578, 0.000),
+    ]
+    history = _history(observed, "gui_action_name_match_rate", "gui_coordinate_within_50_rate")
+    reason = unreachable_gate_projection(history[:5], gate, final_update=1800)
+    assert reason is not None and "gui_coordinate_within_50_rate" in reason
+
+
+def test_stall_detection_leaves_a_climbing_stage_alone():
+    """The contract bootstrap climbed ~13 points a chunk and passed at chunk 6.
+
+    A stage improving toward its bar must never be cut short, which is the
+    failure mode that would make early stopping worse than the waste it saves.
+    """
+    gate = GenerationGate(gui_parse_rate_min=0.65)
+    climbing = [(100, 0.426), (200, 0.563), (300, 0.688), (400, 0.805), (500, 0.860)]
+    assert unreachable_gate_projection(
+        _history(climbing, "gui_parse_rate"), gate, final_update=800
+    ) is None
+
+    # Slow but real progress, and noise around an upward trend, both continue.
+    slow = [(100, 0.30), (200, 0.34), (300, 0.38), (400, 0.42), (500, 0.46)]
+    noisy = [(100, 0.30), (200, 0.36), (300, 0.33), (400, 0.41), (500, 0.39)]
+    for trajectory in (slow, noisy):
+        assert unreachable_gate_projection(
+            _history(trajectory, "gui_parse_rate"), gate, final_update=1800
+        ) is None
+
+
+def test_stall_detection_needs_history_budget_and_a_gate():
+    gate = GenerationGate(gui_parse_rate_min=0.65)
+    flat = [(100, 0.30), (200, 0.31), (300, 0.30), (400, 0.31), (500, 0.30)]
+    history = _history(flat, "gui_parse_rate")
+    # Too few evaluations to fit a trend.
+    assert unreachable_gate_projection(history[:3], gate, final_update=1800) is None
+    # No budget left to project into.
+    assert unreachable_gate_projection(history, gate, final_update=500) is None
+    # Nothing gated on this metric.
+    assert unreachable_gate_projection(history, GenerationGate(), final_update=1800) is None
+    # Flat and far below the bar, with budget remaining: report it.
+    assert unreachable_gate_projection(history, gate, final_update=1800) is not None
