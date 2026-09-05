@@ -91,12 +91,69 @@ prints *the fast path is not available* and runs the recurrence in Python.
 python -m pip install --no-cache-dir \
   'transformers==5.14.1' 'peft==0.20.0' 'huggingface-hub>=1.26' \
   'datasets>=3.0' 'safetensors>=0.4' 'pillow>=10.0'
-python -m pip install --no-cache-dir causal-conv1d flash-linear-attention
+# Install these SEPARATELY. pip aborts the whole command when one wheel fails
+# to build, so pairing them means a causal-conv1d failure leaves you with
+# neither.
+python -m pip install --no-cache-dir flash-linear-attention
+python -m pip install --no-cache-dir causal-conv1d   # optional, see below
 python -c "import torch,transformers,peft;print(torch.__version__,transformers.__version__,peft.__version__);print(torch.cuda.get_device_name(0))"
 ```
 
-If `flash-linear-attention` refuses to build against the instance's torch, note
-it and continue — Stage 0 does not need speed. Do not start Stage 1 without it.
+### The two kernel packages are independent, and only one of them matters
+
+Read from the installed `transformers/models/qwen3_5/modeling_qwen3_5.py`, not
+from the warning text. Every accelerated symbol has its own fallback and its own
+guard:
+
+```python
+self.causal_conv1d_fn        = causal_conv1d_fn                                  # None if absent
+self.causal_conv1d_update    = causal_conv1d_update    or torch_causal_conv1d_update
+self.chunk_gated_delta_rule  = chunk_gated_delta_rule  or torch_chunk_gated_delta_rule
+self.recurrent_gated_delta_rule = fused_recurrent_gated_delta_rule or torch_recurrent_gated_delta_rule
+```
+
+and at the call site, `if self.causal_conv1d_fn is not None: ... else: <torch>`.
+`is_fast_path_available` is `all(...)` of the four and is used **only to decide
+whether to print the warning** — it gates nothing. So:
+
+- **`flash-linear-attention` is the one that matters.** It supplies the chunked
+  and recurrent gated-delta-rule kernels for all 18 linear-attention layers,
+  which is the cost that scales with the ~2,000 image tokens per screenshot. It
+  is a Triton library, so it needs no `nvcc` and no CUDA toolchain match.
+- **`causal-conv1d` is optional.** It accelerates one depthwise convolution of
+  kernel size 4. It compiles CUDA C++, so it is the one that breaks.
+
+**The warning still prints when only `fla` is installed.** Do not read that as a
+failed install. Check the symbols instead:
+
+```bash
+python - <<'EOF'
+from transformers.models.qwen3_5 import modeling_qwen3_5 as m
+print("gated delta rule kernels:", m.chunk_gated_delta_rule is not None)
+print("causal conv1d kernel:    ", m.causal_conv1d_fn is not None)
+print("(warning flag only):     ", m.is_fast_path_available)
+EOF
+```
+
+The first line is the one that has to be True before Stage 1.
+
+### If `causal-conv1d` fails to build
+
+The failure is a toolchain mismatch, not a bug:
+
+```
+RuntimeError: The detected CUDA version (12.4) mismatches the version that was
+used to compile PyTorch (13.0).
+```
+
+The instance has a cu130 torch wheel and a 12.4 `nvcc`. **Match the toolkit to
+torch, never torch to the toolkit** — downgrading torch to a cu124 build puts
+the transformers 5.14.1 / Qwen3.5 combination at risk, and that combination is
+the only one verified. Either install a CUDA 13 compiler into the environment
+(`pip install nvidia-cuda-nvcc-cu13`, then point `CUDA_HOME` at it) or pick a
+Vast template whose toolkit matches its torch.
+
+Or skip it. Stage 0 does not need either package, and Stage 1 needs only `fla`.
 
 ## Steps
 
