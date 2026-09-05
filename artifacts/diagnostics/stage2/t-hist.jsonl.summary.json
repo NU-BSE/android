@@ -1,0 +1,36 @@
+{
+  "checkpoint": "artifacts/teachers/gui-owl-2b-merged",
+  "corpus": "/private/tmp/claude-501/-Users-ilia-Desktop-Creepy-IM-code-android/ab9da15b-1532-4b80-92f1-7c28747960c2/scratchpad/p-hist.jsonl",
+  "empty_generation_rate": 0.0,
+  "first_token_eos_rate": 0.0,
+  "gui_action_class_recall": {
+    "answer": 0.0,
+    "click": 0.9333333333333333,
+    "system_button": 0.1
+  },
+  "gui_action_macro_recall": 0.3444444444444445,
+  "gui_action_majority_class_rate": 0.4411764705882353,
+  "gui_action_name_match_rate": 0.4411764705882353,
+  "gui_action_records": 34,
+  "gui_action_target_types": 3,
+  "gui_box_records": 15,
+  "gui_coordinate_records": 15,
+  "gui_coordinate_within_50_rate": 0.7333333333333333,
+  "gui_distinct_action_types_emitted": 6,
+  "gui_emitted_action_types": [
+    "click",
+    "long_press",
+    "swipe",
+    "system_button",
+    "type",
+    "wait"
+  ],
+  "gui_generated_x_max": 953.0,
+  "gui_generated_x_min": 68.0,
+  "gui_median_coordinate_error": 3.1622776601683795,
+  "gui_parse_rate": 0.9705882352941176,
+  "gui_point_in_box_rate": 0.8,
+  "median_generated_tokens": 40.5,
+  "output": "/private/tmp/claude-501/-Users-ilia-Desktop-Creepy-IM-code-android/ab9da15b-1532-4b80-92f1-7c28747960c2/scratchpad/t-hist.jsonl",
+  "records": 34
+}
