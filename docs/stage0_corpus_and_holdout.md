@@ -169,7 +169,7 @@ free = shutil.disk_usage("/workspace").free / 2**30
 print(f"{free:.1f} GiB free")
 sys.exit(0 if free > 40 else "refusing to start: need >40 GiB free for the download")
 EOF
-export HF_TOKEN=...            # the second snapshot_download call does not pass a token explicitly
+export HF_TOKEN=...            # both snapshot_download calls pass it
 export HF_HOME=/workspace/.hf  # keep the model cache on the big volume, not the 10 GB root
 ```
 
@@ -190,6 +190,24 @@ du -sh artifacts/uni-gui-openmobile   # expect ~11 GB
 ```
 
 Expect roughly an hour. It is resumable: re-running skips what is present.
+
+**It will look hung, and it probably is not.** With no filter there is one pass
+and one line of output before a ~10 GB transfer whose Xet progress bars can sit
+silent for minutes. Everything the function does locally is fast — measured on
+the full 2,640-episode set, the metadata glob and JSON parse take 0.4s and the
+allowlist filter takes 9.3s — so more than ~10s of silence is the transfer, not
+a stall. Confirm it from outside rather than watching the bar:
+
+```bash
+watch -n 30 'du -sh artifacts/uni-gui-openmobile; ls artifacts/uni-gui-openmobile | wc -l'
+```
+
+Growing bytes means it is working. If they are flat for several minutes, get the
+actual stack rather than guessing:
+
+```bash
+pip install py-spy && py-spy dump --pid $(pgrep -f download_unigui_openmobile)
+```
 
 ### 3. Prepare the widened corpus
 

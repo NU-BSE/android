@@ -84,6 +84,16 @@ def download_unigui_openmobile(
     The first snapshot fetches all small ``task.json`` files. After filtering by
     app/package, a second snapshot fetches only the selected episode screenshots,
     avoiding an unconditional 9+ GB download when only Settings is needed.
+
+    With no filter and no episode cap there is nothing to select, so the two
+    passes collapse into one and the per-episode allowlist collapses into two
+    wildcards. That matters: the allowlist is matched with ``fnmatchcase``
+    against every file in the repo, so enumerating all 2,640 episodes builds
+    5,280 patterns and costs ~9s of pure CPU for a filter that keeps everything.
+
+    Each phase announces itself. The transfer is ~10 GB for the unfiltered set
+    and the progress bars can sit silent for minutes, which is indistinguishable
+    from a hang unless the caller is told which phase it is in.
     """
     try:
         from huggingface_hub import snapshot_download
@@ -93,6 +103,26 @@ def download_unigui_openmobile(
         ) from exc
 
     destination = Path(local_dir)
+    token = os.environ.get("HF_TOKEN") or None
+
+    if not app and not package and max_episodes is None:
+        print(
+            f"[unigui] no app/package filter: fetching every episode into "
+            f"{destination} in one pass (~10 GB)",
+            flush=True,
+        )
+        return Path(
+            snapshot_download(
+                repo_id=DATASET_ID,
+                repo_type="dataset",
+                revision=revision,
+                allow_patterns=["README.md", "*/task.json", "*/screenshot_step*.png"],
+                local_dir=str(destination),
+                token=token,
+            )
+        )
+
+    print(f"[unigui] phase 1/2: fetching episode metadata into {destination}", flush=True)
     root = Path(
         snapshot_download(
             repo_id=DATASET_ID,
@@ -100,7 +130,7 @@ def download_unigui_openmobile(
             revision=revision,
             allow_patterns=["README.md", "*/task.json"],
             local_dir=str(destination),
-            token=os.environ.get("HF_TOKEN") or None
+            token=token,
         )
     )
     selected: list[str] = []
@@ -120,6 +150,11 @@ def download_unigui_openmobile(
     patterns: list[str] = []
     for episode in selected:
         patterns.extend((f"{episode}/task.json", f"{episode}/screenshot_step*.png"))
+    print(
+        f"[unigui] phase 2/2: {len(selected)} episodes matched app={app!r} "
+        f"package={package!r}; fetching their screenshots",
+        flush=True,
+    )
     return Path(
         snapshot_download(
             repo_id=DATASET_ID,
@@ -127,6 +162,7 @@ def download_unigui_openmobile(
             revision=revision,
             allow_patterns=patterns,
             local_dir=str(destination),
+            token=token,
         )
     )
 
