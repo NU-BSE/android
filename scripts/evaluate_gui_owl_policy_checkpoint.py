@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import collections
 import json
 import random
 import statistics
@@ -62,13 +63,19 @@ def _load_gui_records(path: Path) -> list[dict[str, object]]:
 def evaluate(args: argparse.Namespace) -> dict[str, object]:
     try:
         import torch
-        from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
+        from transformers import AutoModelForImageTextToText, AutoProcessor
     except ImportError as exc:
         raise RuntimeError("install the training extra: python -m pip install -e '.[train]'") from exc
 
+    # Resolve by architecture rather than hardcoding Qwen3-VL. For a qwen3_vl
+    # checkpoint this is the same class; it also admits other multimodal
+    # backbones (e.g. qwen3_5) so a candidate can be scored on this corpus
+    # under the identical prompt and metric.
     checkpoint = Path(args.checkpoint)
     if not checkpoint.is_dir():
-        raise FileNotFoundError(f"checkpoint not found: {checkpoint}")
+        # A Hugging Face repo id is not a local path but is a valid source.
+        if "/" not in str(args.checkpoint) or str(args.checkpoint).startswith("."):
+            raise FileNotFoundError(f"checkpoint not found: {checkpoint}")
     corpus = Path(args.corpus)
     records = _load_gui_records(corpus)
 
@@ -84,11 +91,11 @@ def evaluate(args: argparse.Namespace) -> dict[str, object]:
     dtype = torch.bfloat16 if device.startswith("cuda") else torch.float32
     processor = AutoProcessor.from_pretrained(str(checkpoint))
     try:
-        model = Qwen3VLForConditionalGeneration.from_pretrained(
+        model = AutoModelForImageTextToText.from_pretrained(
             str(checkpoint), dtype=dtype, attn_implementation="sdpa", low_cpu_mem_usage=True
         )
     except TypeError:
-        model = Qwen3VLForConditionalGeneration.from_pretrained(
+        model = AutoModelForImageTextToText.from_pretrained(
             str(checkpoint), torch_dtype=dtype, attn_implementation="sdpa", low_cpu_mem_usage=True
         )
     model.to(device)
@@ -107,6 +114,16 @@ def evaluate(args: argparse.Namespace) -> dict[str, object]:
     coordinate_within_50 = 0
     emitted_actions: set[str] = set()
     generated_x: list[float] = []
+    # gui_action_name_match_rate has a majority-class floor: 65.3% of the
+    # episode holdout is mobile.click, so a model with one action scores 0.653
+    # against a 0.65 gate. Per-class recall is what separates coverage from
+    # that floor, and the floor itself is reported so the pass can be read.
+    action_class_total: collections.Counter[str] = collections.Counter()
+    action_class_hit: collections.Counter[str] = collections.Counter()
+    # The median annotated box is 224x64 on the 0..1000 scale, so a 50px radius
+    # fails clicks that would land on the element. Point-in-box is the metric
+    # the annotation actually supports.
+    box_records = point_in_box = 0
 
     with output.open("w", encoding="utf-8") as handle, torch.no_grad():
         for index, record in enumerate(selected):
@@ -151,8 +168,26 @@ def evaluate(args: argparse.Namespace) -> dict[str, object]:
                 emitted_actions.add(correctness.generated_action)
             if correctness.target_action:
                 action_records += 1
+                action_class_total[correctness.target_action] += 1
                 if correctness.action_match:
                     action_matches += 1
+                    action_class_hit[correctness.target_action] += 1
+            bbox = record.get("target_bbox")
+            in_box: bool | None = None
+            if (
+                isinstance(bbox, Sequence)
+                and not isinstance(bbox, (str, bytes))
+                and len(bbox) == 4
+            ):
+                box_records += 1
+                point = correctness.generated_coordinate
+                if point is not None:
+                    x0, y0, x1, y1 = (float(value) for value in bbox)
+                    in_box = x0 <= float(point[0]) <= x1 and y0 <= float(point[1]) <= y1
+                else:
+                    in_box = False
+                if in_box:
+                    point_in_box += 1
             if correctness.coordinate_error is not None:
                 coordinate_errors.append(float(correctness.coordinate_error))
                 if correctness.coordinate_error <= 50.0:
@@ -175,6 +210,8 @@ def evaluate(args: argparse.Namespace) -> dict[str, object]:
                 "target_coordinate": correctness.target_coordinate,
                 "generated_coordinate": correctness.generated_coordinate,
                 "coordinate_error": correctness.coordinate_error,
+                "target_bbox": list(bbox) if in_box is not None else None,
+                "point_in_box": in_box,
                 "has_action_prefix": text.startswith("Action:"),
                 "has_tool_call_open": "<tool_call>" in text,
                 "has_tool_call_close": "</tool_call>" in text,
@@ -195,6 +232,20 @@ def evaluate(args: argparse.Namespace) -> dict[str, object]:
         "gui_parse_rate": valid / total,
         "gui_action_records": action_records,
         "gui_action_name_match_rate": action_matches / action_records if action_records else 0.0,
+        "gui_action_macro_recall": (
+            sum(action_class_hit[name] / count for name, count in action_class_total.items())
+            / len(action_class_total)
+            if action_class_total
+            else 0.0
+        ),
+        "gui_action_class_recall": {
+            name: action_class_hit[name] / count
+            for name, count in sorted(action_class_total.items())
+        },
+        "gui_action_majority_class_rate": (
+            max(action_class_total.values()) / action_records if action_records else 0.0
+        ),
+        "gui_action_target_types": len(action_class_total),
         "gui_distinct_action_types_emitted": len(emitted_actions),
         "gui_emitted_action_types": sorted(emitted_actions),
         "gui_coordinate_records": coordinate_records,
@@ -204,6 +255,8 @@ def evaluate(args: argparse.Namespace) -> dict[str, object]:
         "gui_coordinate_within_50_rate": (
             coordinate_within_50 / coordinate_records if coordinate_records else 0.0
         ),
+        "gui_box_records": box_records,
+        "gui_point_in_box_rate": point_in_box / box_records if box_records else 0.0,
         "gui_generated_x_min": min(generated_x) if generated_x else None,
         "gui_generated_x_max": max(generated_x) if generated_x else None,
         "output": str(output),
