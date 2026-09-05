@@ -95,13 +95,48 @@ artifacts/calibration/gui-owl-compression.json
 
 The manifest records activation/residual saliency for text layers, residual
 channels, MLP neurons, query/KV heads, vision layers, vision channels, vision
-heads, and vision MLP neurons. The 0.5B build is allowed only when calibration
-actually exercised the vision tower.
+heads, and vision MLP neurons. MLP neurons are ranked by the energy of the
+**gated activation that enters `down_proj`** (`text.mlp_activation_scores`),
+not by the `gate_proj` pre-activation energy older manifests recorded: the
+older ranking prunes the super-activation neurons, and at FFN 4096 (a third
+removed, no training) the 2B answers with EOS as its first token and parses 0
+of 128 GUI records, with a random ranking doing no worse. The gated ranking
+keeps the same model coherent at FFN 3072. The builder refuses a text-MLP
+width build from a manifest without the new field; re-run calibration.
+Any build that narrows the vision tower is allowed only when calibration
+actually exercised it; text-only width pruning needs only the text scores.
+
+Structured selections are derived from those raw scores for **every student
+architecture in the plan**, for every axis the student narrows and no other.
+A manifest calibrated for one target therefore serves any later width target
+without re-running the teacher, and a student that keeps its 2048-wide residual
+stream never touches embedding, `lm_head`, or patch-merger tensors: pruning MLP
+neurons or GQA groups is a local edit inside each block.
 
 Before a progressive build, the runner normalizes text head selections at the
-**GQA group** level. Qwen3-VL uses two query heads per KV head in both the source
-and 0.5B target. Query and KV heads are therefore never independently top-k
-pruned: a retained KV head keeps its corresponding query-head pair.
+**GQA group** level. Qwen3-VL uses two query heads per KV head in every target.
+Query and KV heads are therefore never independently top-k pruned: a retained
+KV head keeps its corresponding query-head pair. Head pruning changes
+`num_attention_heads * head_dim`, never `hidden_size`: Qwen3 maps the residual
+stream to the head space through `q_proj`/`o_proj`, so the inherited
+`head_dim` (128) is carried on the spec and 12 heads on a 2048-wide residual is
+a valid student.
+
+To measure what a width change does to grounding *before* paying for
+recovery, build and evaluate variants of a source checkpoint with the
+production builder and the shipping-contract evaluator:
+
+```bash
+python scripts/sweep_gui_owl_width.py \
+  --source-model artifacts/teachers/gui-owl-2b-merged --device cuda \
+  --variant ffn3072=text_intermediate_size:3072 \
+  --variant budget=text_intermediate_size:3072,text_attention_heads:12,text_key_value_heads:6 \
+  --output artifacts/diagnostics/width/sweep.json
+```
+
+`--selection random` replaces the calibration scores with random ones before
+deriving the selections, which is the control that says whether the saliency
+metric is doing anything for grounding.
 
 The old `first N dimensions` prefix-copy rule is removed. Every width-changing
 tensor must have a structured mapping. Unknown shape changes fail rather than

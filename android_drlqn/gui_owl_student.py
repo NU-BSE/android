@@ -45,6 +45,11 @@ class StudentSpec:
     deepstack_visual_indexes: tuple[int, ...]
     freeze_vision_during_kd: bool
     max_relative_parameter_error: float = 0.15
+    # Qwen3 decouples the attention head width from the residual width: q_proj
+    # maps hidden_size -> heads * head_dim and o_proj maps it back. Head pruning
+    # therefore changes heads * head_dim, never hidden_size, so the spec carries
+    # the inherited head_dim explicitly instead of deriving it from hidden_size.
+    text_head_dim: int = 128
 
     def __post_init__(self) -> None:
         if self.target_parameters <= 0:
@@ -55,6 +60,7 @@ class StudentSpec:
             self.text_intermediate_size,
             self.text_attention_heads,
             self.text_key_value_heads,
+            self.text_head_dim,
             self.vision_depth,
             self.vision_hidden_size,
             self.vision_intermediate_size,
@@ -62,8 +68,6 @@ class StudentSpec:
         )
         if min(positive) <= 0:
             raise ValueError("student dimensions must be positive")
-        if self.text_hidden_size % self.text_attention_heads:
-            raise ValueError("text hidden size must be divisible by attention heads")
         if self.text_attention_heads % self.text_key_value_heads:
             raise ValueError("attention heads must be divisible by key/value heads")
         if self.vision_hidden_size % self.vision_heads:
@@ -162,7 +166,10 @@ DEFAULT_STUDENT_SPECS: dict[str, StudentSpec] = {
         vision_hidden_size=768,
         vision_intermediate_size=3072,
         vision_heads=12,
-        deepstack_visual_indexes=(3, 7, 11),
+        # Source deepstack taps 5/11/17 land at compact positions 2/5/8 under
+        # the deepstack-aligned vision selection; the plan and the calibration
+        # normalizer agree on this, so the fallback spec must too.
+        deepstack_visual_indexes=(2, 5, 8),
         freeze_vision_during_kd=False,
         max_relative_parameter_error=0.20,
     ),
@@ -462,6 +469,239 @@ def ranked_indices(scores: Sequence[object], count: int) -> tuple[int, ...]:
     return tuple(sorted(selected))
 
 
+def grouped_query_kv_selection(
+    q_scores: Sequence[object],
+    kv_scores: Sequence[object],
+    *,
+    target_q_heads: int,
+    target_kv_heads: int,
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """Rank whole GQA groups so a retained KV head keeps its query-head group."""
+
+    q = [float(value) for value in q_scores]
+    kv = [float(value) for value in kv_scores]
+    if not q or not kv:
+        raise ValueError("query/KV head scores cannot be empty")
+    if len(q) % len(kv):
+        raise ValueError("source query-head count must be divisible by KV-head count")
+    if target_q_heads % target_kv_heads:
+        raise ValueError("target query-head count must be divisible by target KV-head count")
+    source_group = len(q) // len(kv)
+    target_group = target_q_heads // target_kv_heads
+    if source_group != target_group:
+        raise ValueError(
+            "structured GQA pruning requires the source and target query/KV group size to match"
+        )
+    if not 1 <= target_kv_heads <= len(kv):
+        raise ValueError("target KV-head count must fit inside source KV heads")
+
+    group_scores: list[tuple[float, int]] = []
+    for kv_index, kv_score in enumerate(kv):
+        q_group = q[kv_index * source_group : (kv_index + 1) * source_group]
+        score = float(kv_score) + sum(q_group) / len(q_group)
+        group_scores.append((score, kv_index))
+    selected_kv = tuple(
+        sorted(
+            index
+            for _, index in sorted(
+                group_scores,
+                key=lambda item: (-item[0], item[1]),
+            )[:target_kv_heads]
+        )
+    )
+    selected_q = tuple(
+        head
+        for kv_index in selected_kv
+        for head in range(kv_index * source_group, (kv_index + 1) * source_group)
+    )
+    if len(selected_q) != target_q_heads:
+        raise RuntimeError("grouped-query selection produced the wrong query-head count")
+    return selected_q, selected_kv
+
+
+WIDTH_AXES = (
+    "text_hidden",
+    "text_mlp",
+    "text_q_heads",
+    "text_kv_heads",
+    "vision_hidden",
+    "vision_heads",
+    "vision_mlp",
+)
+
+# MLP neuron saliency: the gated activation that actually enters down_proj
+# (linear_fc2 in the vision tower) is what a neuron contributes; the raw
+# gate_proj / linear_fc1 pre-activation energy is the legacy proxy older
+# manifests recorded. Measured on the 2B with no training, the legacy ranking
+# at FFN 4096 gives first-token EOS with p=0.35 and no parseable GUI output,
+# while the gated-activation ranking stays coherent at FFN 3072. Prefer the
+# former; the builder refuses the legacy one for text.
+TEXT_MLP_SCORE_FIELDS = ("mlp_activation_scores", "mlp_scores")
+
+
+def width_selection_key(axis: str, size: int) -> str:
+    """Name of the ``recommended`` entry holding a structured selection."""
+
+    names = {
+        "text_hidden": "text_hidden_indices",
+        "text_mlp": "text_mlp_indices",
+        "text_q_heads": "text_q_heads",
+        "text_kv_heads": "text_kv_heads",
+        "vision_hidden": "vision_hidden_indices",
+        "vision_heads": "vision_heads",
+        "vision_mlp": "vision_mlp_indices",
+    }
+    if axis not in names:
+        raise ValueError(f"unknown width axis: {axis}")
+    return f"{names[axis]}_{int(size)}"
+
+
+def _section(calibration: Mapping[str, object], name: str) -> Mapping[str, object]:
+    value = calibration.get(name)
+    if not isinstance(value, Mapping):
+        raise ValueError(f"calibration manifest lacks the {name} section")
+    return value
+
+
+def _per_layer_scores(section: Mapping[str, object], field: str) -> dict[str, Sequence[object]]:
+    value = section.get(field)
+    if not isinstance(value, Mapping) or not value:
+        raise ValueError(f"calibration manifest lacks per-layer {field}")
+    return {str(key): item for key, item in value.items()}
+
+
+def width_pruned_axes(
+    spec: StudentSpec, source_config: Mapping[str, object]
+) -> dict[str, tuple[int, int]]:
+    """Return ``axis -> (source_size, target_size)`` for every axis a spec narrows."""
+
+    text = source_config.get("text_config")
+    vision = source_config.get("vision_config")
+    if not isinstance(text, Mapping) or not isinstance(vision, Mapping):
+        raise ValueError("source config must contain text_config and vision_config")
+    pairs = {
+        "text_hidden": (int(text["hidden_size"]), spec.text_hidden_size),
+        "text_mlp": (int(text["intermediate_size"]), spec.text_intermediate_size),
+        "text_q_heads": (int(text["num_attention_heads"]), spec.text_attention_heads),
+        "text_kv_heads": (int(text["num_key_value_heads"]), spec.text_key_value_heads),
+        "vision_hidden": (int(vision["hidden_size"]), spec.vision_hidden_size),
+        "vision_heads": (int(vision["num_heads"]), spec.vision_heads),
+        "vision_mlp": (int(vision["intermediate_size"]), spec.vision_intermediate_size),
+    }
+    for axis, (source, target) in pairs.items():
+        if target > source:
+            raise ValueError(f"{axis}: student width {target} exceeds source width {source}")
+    return {axis: pair for axis, pair in pairs.items() if pair[0] != pair[1]}
+
+
+def derive_width_selections(
+    calibration: Mapping[str, object], spec: StudentSpec
+) -> dict[str, object]:
+    """Return ranked structured selections for every axis ``spec`` narrows.
+
+    Selections are rebuilt from the raw scores the calibration recorded, so a
+    manifest calibrated for one target serves any other without re-running the
+    teacher. Only narrowed axes are produced: a student that keeps its residual
+    width never touches embedding, lm_head, or merger tensors, which is what
+    makes text-only width pruning a local edit to each block.
+    """
+
+    text = _section(calibration, "text")
+    source_text_hidden = int(text.get("hidden_size") or 0)
+    source_q = int(text.get("attention_heads") or 0)
+    source_kv = int(text.get("key_value_heads") or 0)
+    mlp_field = next((field for field in TEXT_MLP_SCORE_FIELDS if field in text), None)
+    source_text_mlp = 0
+    if mlp_field is not None:
+        first = next(iter(_per_layer_scores(text, mlp_field).values()))
+        source_text_mlp = len(first)
+
+    vision_raw = calibration.get("vision")
+    vision = vision_raw if isinstance(vision_raw, Mapping) else {}
+    vision_ready = bool(vision.get("ready"))
+    source_vision_hidden = int(vision.get("hidden_size") or 0)
+    source_vision_heads = int(vision.get("attention_heads") or 0)
+
+    output: dict[str, object] = {}
+
+    if source_text_hidden and spec.text_hidden_size != source_text_hidden:
+        output[width_selection_key("text_hidden", spec.text_hidden_size)] = list(
+            ranked_indices(text.get("hidden_scores") or (), spec.text_hidden_size)
+        )
+    if source_text_mlp and spec.text_intermediate_size != source_text_mlp:
+        assert mlp_field is not None
+        scores = _per_layer_scores(text, mlp_field)
+        output[width_selection_key("text_mlp", spec.text_intermediate_size)] = {
+            layer: list(ranked_indices(values, spec.text_intermediate_size))
+            for layer, values in scores.items()
+        }
+        output["text_mlp_score_source"] = mlp_field
+    if source_q and source_kv and (
+        spec.text_attention_heads != source_q or spec.text_key_value_heads != source_kv
+    ):
+        q_scores = _per_layer_scores(text, "q_head_scores")
+        kv_scores = _per_layer_scores(text, "kv_head_scores")
+        q_out: dict[str, list[int]] = {}
+        kv_out: dict[str, list[int]] = {}
+        for layer in q_scores:
+            if layer not in kv_scores:
+                raise ValueError(f"calibration manifest lacks KV head scores for layer {layer}")
+            selected_q, selected_kv = grouped_query_kv_selection(
+                q_scores[layer],
+                kv_scores[layer],
+                target_q_heads=spec.text_attention_heads,
+                target_kv_heads=spec.text_key_value_heads,
+            )
+            q_out[layer] = list(selected_q)
+            kv_out[layer] = list(selected_kv)
+        output[width_selection_key("text_q_heads", spec.text_attention_heads)] = q_out
+        output[width_selection_key("text_kv_heads", spec.text_key_value_heads)] = kv_out
+
+    narrows_vision = bool(source_vision_hidden) and (
+        spec.vision_hidden_size != source_vision_hidden
+        or spec.vision_heads != source_vision_heads
+    )
+    if narrows_vision and not vision_ready:
+        raise ValueError(
+            "vision width pruning requires a calibration run that exercised the vision tower"
+        )
+    if narrows_vision:
+        source_head_dim = source_vision_hidden // max(1, source_vision_heads)
+        if spec.vision_hidden_size != spec.vision_heads * source_head_dim:
+            raise ValueError(
+                "vision hidden size must equal vision_heads * inherited vision head_dim; "
+                "the vision attention derives head_dim from hidden_size"
+            )
+        if spec.vision_hidden_size != source_vision_hidden:
+            output[width_selection_key("vision_hidden", spec.vision_hidden_size)] = list(
+                ranked_indices(vision.get("hidden_scores") or (), spec.vision_hidden_size)
+            )
+        if spec.vision_heads != source_vision_heads:
+            head_scores = _per_layer_scores(vision, "head_scores")
+            output[width_selection_key("vision_heads", spec.vision_heads)] = {
+                block: list(ranked_indices(values, spec.vision_heads))
+                for block, values in head_scores.items()
+            }
+    vision_mlp_field = next(
+        (
+            field
+            for field in TEXT_MLP_SCORE_FIELDS
+            if isinstance(vision.get(field), Mapping) and vision[field]
+        ),
+        None,
+    )
+    if vision_ready and vision_mlp_field is not None:
+        mlp_scores = _per_layer_scores(vision, vision_mlp_field)
+        source_vision_mlp = len(next(iter(mlp_scores.values())))
+        if spec.vision_intermediate_size != source_vision_mlp:
+            output[width_selection_key("vision_mlp", spec.vision_intermediate_size)] = {
+                block: list(ranked_indices(values, spec.vision_intermediate_size))
+                for block, values in mlp_scores.items()
+            }
+            output["vision_mlp_score_source"] = vision_mlp_field
+    return output
+
+
 def expand_head_indices(head_indices: Sequence[int], head_dim: int) -> tuple[int, ...]:
     if head_dim <= 0:
         raise ValueError("head_dim must be positive")
@@ -512,10 +752,16 @@ def build_student_config_dict(
     vision_out = copy.deepcopy(dict(vision))
     target_text_layers = int(text_layers if text_layers is not None else spec.text_layers)
 
-    head_dim = int(text_out.get("head_dim") or 0)
-    if head_dim and spec.text_hidden_size != spec.text_attention_heads * head_dim:
+    inherited_head_dim = int(
+        text_out.get("head_dim")
+        or int(text_out["hidden_size"]) // int(text_out["num_attention_heads"])
+    )
+    if inherited_head_dim != spec.text_head_dim:
+        # Structured slicing keeps whole heads; it cannot change the per-head
+        # width, and RoPE/q_norm/k_norm are all sized by head_dim.
         raise ValueError(
-            "student hidden size must equal attention_heads * inherited head_dim"
+            f"student head_dim {spec.text_head_dim} must equal the inherited head_dim "
+            f"{inherited_head_dim}"
         )
 
     text_out.update(
@@ -525,6 +771,7 @@ def build_student_config_dict(
             "intermediate_size": spec.text_intermediate_size,
             "num_attention_heads": spec.text_attention_heads,
             "num_key_value_heads": spec.text_key_value_heads,
+            "head_dim": spec.text_head_dim,
         }
     )
     vision_out.update(
@@ -617,6 +864,22 @@ def spec_from_plan(plan: Mapping[str, object], name: str) -> StudentSpec:
         int(value) for value in merged["deepstack_visual_indexes"]
     )
     return StudentSpec(**merged)
+
+
+def plan_student_specs(plan: Mapping[str, object] | None) -> list[StudentSpec]:
+    """Every student architecture a calibration manifest must carry selections for.
+
+    The defaults are always included so a plan that omits a student still gets
+    the fallback spec's widths; plan entries override them by name.
+    """
+
+    specs: dict[str, StudentSpec] = dict(DEFAULT_STUDENT_SPECS)
+    students = plan.get("students") if isinstance(plan, Mapping) else None
+    if isinstance(students, Mapping):
+        for name in students:
+            if str(name) in DEFAULT_STUDENT_SPECS:
+                specs[str(name)] = spec_from_plan(plan, str(name))
+    return list(specs.values())
 
 
 def gate_from_mapping(value: Mapping[str, object] | None) -> GenerationGate:
@@ -808,16 +1071,21 @@ __all__ = [
     "TEXT_COVERAGE_BALANCED_MAX_DEPTH",
     "TEXT_LAYER_GAP_FACTOR",
     "GATED_METRIC_DIRECTIONS",
+    "TEXT_MLP_SCORE_FIELDS",
     "TEXT_TAIL_PROTECTED_LAYERS",
+    "WIDTH_AXES",
     "unreachable_gate_projection",
     "build_student_config_dict",
+    "derive_width_selections",
     "evenly_spaced_layer_map",
     "expand_head_indices",
     "expand_spatial_merge_indices",
     "gate_from_mapping",
     "generation_gate_failures",
+    "grouped_query_kv_selection",
     "load_calibration_manifest",
     "load_student_plan",
+    "plan_student_specs",
     "protected_text_layer_ids",
     "protected_text_tail_layers",
     "ranked_indices",
@@ -829,4 +1097,6 @@ __all__ = [
     "teacher_key_for_student",
     "text_layer_gap_limit",
     "text_layer_selection_is_safe",
+    "width_pruned_axes",
+    "width_selection_key",
 ]

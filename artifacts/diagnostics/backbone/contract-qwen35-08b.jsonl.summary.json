@@ -1,0 +1,23 @@
+{
+  "checkpoint": "Qwen/Qwen3.5-0.8B",
+  "corpus": "/private/tmp/claude-501/-Users-ilia-Desktop-Creepy-IM-code-android/a03f8755-456a-4274-a974-6e4e5ed3df59/scratchpad/gui-policy-local.jsonl",
+  "empty_generation_rate": 0.0,
+  "first_token_eos_rate": 0.0,
+  "gui_action_name_match_rate": 0.6354166666666666,
+  "gui_action_records": 192,
+  "gui_coordinate_records": 164,
+  "gui_coordinate_within_50_rate": 0.35365853658536583,
+  "gui_distinct_action_types_emitted": 3,
+  "gui_emitted_action_types": [
+    "click",
+    "swipe",
+    "type"
+  ],
+  "gui_generated_x_max": 971.0,
+  "gui_generated_x_min": 61.0,
+  "gui_median_coordinate_error": 201.1385749131705,
+  "gui_parse_rate": 0.875,
+  "median_generated_tokens": 21.0,
+  "output": "artifacts/diagnostics/backbone/contract-qwen35-08b.jsonl",
+  "records": 192
+}

@@ -16,8 +16,9 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 from android_drlqn.gui_owl_student import (
+    derive_width_selections,
     load_student_plan,
-    ranked_indices,
+    plan_student_specs,
     resolve_peft_adapter_dir,
     TEXT_TAIL_PROTECTED_LAYERS,
     select_salient_layer_ids,
@@ -177,6 +178,20 @@ class _Accumulator:
             current.add_(tensor)
             self.counts[name] += 1
 
+    def add_vector_max(self, name: str, value) -> None:
+        """Running element-wise maximum; peak activations mark super-weight neurons."""
+        tensor = value.detach().float().cpu()
+        if tensor.ndim != 1:
+            raise ValueError(f"calibration vector {name} must be one-dimensional")
+        current = self.vectors.get(name)
+        if current is None:
+            self.vectors[name] = tensor.clone()
+            self.counts[name] = 0
+        else:
+            if tuple(current.shape) != tuple(tensor.shape):
+                raise RuntimeError(f"calibration vector shape changed for {name}")
+            self.torch.maximum(current, tensor, out=current)
+
     def add_scalar(self, name: str, value: float) -> None:
         self.scalars[name] = self.scalars.get(name, 0.0) + float(value)
         self.scalar_counts[name] = self.scalar_counts.get(name, 0) + 1
@@ -254,9 +269,19 @@ def calibrate(args: argparse.Namespace) -> dict[str, object]:
         def mlp_hook(_module, _inputs, output, index=layer_index):
             acc.add_vector(f"text_mlp:{index}", _vector_energy(output))
 
+        def mlp_activation_hook(_module, inputs, index=layer_index):
+            # What a neuron actually contributes is the gated activation
+            # act(gate) * up that enters down_proj, not the gate pre-activation.
+            if inputs:
+                activation = inputs[0].detach().float()
+                acc.add_vector(f"text_mlp_activation:{index}", _vector_energy(activation))
+                peak = activation.abs().reshape(-1, activation.shape[-1]).max(dim=0).values
+                acc.add_vector_max(f"text_mlp_activation_peak:{index}", peak)
+
         handles.append(layer.self_attn.q_proj.register_forward_hook(q_hook))
         handles.append(layer.self_attn.k_proj.register_forward_hook(k_hook))
         handles.append(layer.mlp.gate_proj.register_forward_hook(mlp_hook))
+        handles.append(layer.mlp.down_proj.register_forward_pre_hook(mlp_activation_hook))
 
     for block_index, block in enumerate(vision_blocks):
         def block_hook(_module, inputs, output, index=block_index):
@@ -276,9 +301,16 @@ def calibrate(args: argparse.Namespace) -> dict[str, object]:
         def vision_mlp_hook(_module, _inputs, output, index=block_index):
             acc.add_vector(f"vision_mlp:{index}", _vector_energy(output))
 
+        def vision_mlp_activation_hook(_module, inputs, index=block_index):
+            # Post-GELU activation entering linear_fc2, for the same reason as
+            # the text down_proj input above.
+            if inputs:
+                acc.add_vector(f"vision_mlp_activation:{index}", _vector_energy(inputs[0]))
+
         handles.append(block.register_forward_hook(block_hook))
         handles.append(block.attn.qkv.register_forward_hook(qkv_hook))
         handles.append(block.mlp.linear_fc1.register_forward_hook(vision_mlp_hook))
+        handles.append(block.mlp.linear_fc2.register_forward_pre_hook(vision_mlp_activation_hook))
 
     mode_counts = {"gui_policy": 0, "chat": 0}
     completion_tokens = 0
@@ -324,6 +356,14 @@ def calibrate(args: argparse.Namespace) -> dict[str, object]:
         str(index): acc.vector(f"text_mlp:{index}")
         for index in range(len(language_layers))
     }
+    text_mlp_activation_scores = {
+        str(index): acc.vector(f"text_mlp_activation:{index}")
+        for index in range(len(language_layers))
+    }
+    text_mlp_activation_peak_scores = {
+        str(index): acc.vector(f"text_mlp_activation_peak:{index}")
+        for index in range(len(language_layers))
+    }
     text_q_head_scores = {
         str(index): acc.vector(f"text_q_heads:{index}")
         for index in range(len(language_layers))
@@ -337,12 +377,17 @@ def calibrate(args: argparse.Namespace) -> dict[str, object]:
     vision_layer_scores: list[float] = []
     vision_hidden_scores: list[float] = []
     vision_mlp_scores: dict[str, list[float]] = {}
+    vision_mlp_activation_scores: dict[str, list[float]] = {}
     vision_head_scores: dict[str, list[float]] = {}
     if vision_ready:
         vision_layer_scores = [acc.scalar(f"vision_layer:{index}") for index in range(len(vision_blocks))]
         vision_hidden_scores = acc.vector("vision_hidden")
         vision_mlp_scores = {
             str(index): acc.vector(f"vision_mlp:{index}")
+            for index in range(len(vision_blocks))
+        }
+        vision_mlp_activation_scores = {
+            str(index): acc.vector(f"vision_mlp_activation:{index}")
             for index in range(len(vision_blocks))
         }
         vision_head_scores = {
@@ -366,20 +411,6 @@ def calibrate(args: argparse.Namespace) -> dict[str, object]:
     recommended: dict[str, object] = {
         "text_layers_by_depth": depth_layers,
     }
-    if len(text_hidden_scores) >= 1024:
-        recommended["text_hidden_indices_1024"] = list(ranked_indices(text_hidden_scores, 1024))
-        recommended["text_q_heads_8"] = {
-            str(index): list(ranked_indices(text_q_head_scores[str(index)], 8))
-            for index in range(len(language_layers))
-        }
-        recommended["text_kv_heads_4"] = {
-            str(index): list(ranked_indices(text_kv_head_scores[str(index)], 4))
-            for index in range(len(language_layers))
-        }
-        recommended["text_mlp_indices_3072"] = {
-            str(index): list(ranked_indices(text_mlp_scores[str(index)], 3072))
-            for index in range(len(language_layers))
-        }
     if vision_ready:
         recommended["vision_layers_by_depth"] = {
             "12": list(
@@ -389,15 +420,6 @@ def calibrate(args: argparse.Namespace) -> dict[str, object]:
                     12,
                 )
             )
-        }
-        recommended["vision_hidden_indices_768"] = list(ranked_indices(vision_hidden_scores, 768))
-        recommended["vision_heads_12"] = {
-            str(index): list(ranked_indices(vision_head_scores[str(index)], 12))
-            for index in range(len(vision_blocks))
-        }
-        recommended["vision_mlp_indices_3072"] = {
-            str(index): list(ranked_indices(vision_mlp_scores[str(index)], 3072))
-            for index in range(len(vision_blocks))
         }
 
     manifest = {
@@ -420,26 +442,48 @@ def calibrate(args: argparse.Namespace) -> dict[str, object]:
             "layer_scores": text_layer_scores,
             "hidden_scores": text_hidden_scores,
             "mlp_scores": text_mlp_scores,
+            "mlp_activation_scores": text_mlp_activation_scores,
+            "mlp_activation_peak_scores": text_mlp_activation_peak_scores,
             "q_head_scores": text_q_head_scores,
             "kv_head_scores": text_kv_head_scores,
         },
         "vision": {
             "ready": vision_ready,
             "layers": len(vision_blocks),
-            "hidden_size": len(vision_hidden_scores) if vision_ready else 0,
+            # The tower shape is recorded even when no image exercised it, so a
+            # vision-narrowing build can be refused for the right reason.
+            "hidden_size": int(core.config.vision_config.hidden_size),
             "attention_heads": vision_heads,
             "head_dim": vision_head_dim,
             "layer_scores": vision_layer_scores,
             "hidden_scores": vision_hidden_scores,
             "mlp_scores": vision_mlp_scores,
+            "mlp_activation_scores": vision_mlp_activation_scores,
             "head_scores": vision_head_scores,
         },
         "recommended": recommended,
-        "width_pruning_ready": bool(vision_ready and "text_hidden_indices_1024" in recommended),
+        "width_pruning_ready": bool(vision_ready and text_hidden_scores),
         "selection_method": "activation_energy_and_residual_saliency",
         "prefix_dimension_truncation_used": False,
         "credentials_written": False,
     }
+
+    # Width selections for every student the plan declares, derived from the
+    # raw scores above. Only narrowed axes are emitted, and GQA groups are kept
+    # whole, so the runner's normalization step finds nothing to repair.
+    mlp_sources: dict[str, str] = {}
+    for spec in plan_student_specs(plan):
+        try:
+            derived = derive_width_selections(manifest, spec)
+        except ValueError:
+            continue
+        source = derived.pop("text_mlp_score_source", None)
+        derived.pop("vision_mlp_score_source", None)
+        if isinstance(source, str):
+            mlp_sources[spec.name] = source
+        recommended.update(derived)
+    if mlp_sources:
+        manifest["text_mlp_score_source"] = mlp_sources
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")

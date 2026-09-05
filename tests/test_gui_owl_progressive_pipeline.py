@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 from pathlib import Path
 
@@ -128,6 +129,103 @@ def test_grouped_query_pruning_keeps_query_heads_with_their_kv_head():
     )
     assert kv_heads == (1, 3, 5, 7)
     assert q_heads == (2, 3, 6, 7, 10, 11, 14, 15)
+
+
+def _tiny_calibration(layers: int = 2) -> dict[str, object]:
+    return {
+        "schema_version": 2,
+        "text": {
+            "layers": layers,
+            "hidden_size": 8,
+            "attention_heads": 16,
+            "key_value_heads": 8,
+            "head_dim": 2,
+            "layer_scores": [1.0] * layers,
+            "hidden_scores": [float(index) for index in range(8)],
+            "mlp_scores": {str(i): [float(j) for j in range(12)] for i in range(layers)},
+            "q_head_scores": {str(i): [float(j) for j in range(16)] for i in range(layers)},
+            "kv_head_scores": {str(i): [float(j) for j in range(8)] for i in range(layers)},
+        },
+        "vision": {"ready": False, "hidden_size": 1024, "attention_heads": 16},
+        "recommended": {"text_layers_by_depth": {}},
+    }
+
+
+def test_normalize_derives_width_selections_for_every_plan_student(tmp_path: Path):
+    from scripts.normalize_gui_owl_calibration import normalize_manifest
+
+    path = tmp_path / "calibration.json"
+    path.write_text(json.dumps(_tiny_calibration()), encoding="utf-8")
+    plan = {
+        "students": {
+            "1.5b": {
+                "text_layers": 2,
+                "text_hidden_size": 8,
+                "text_intermediate_size": 6,
+                "text_attention_heads": 12,
+                "text_key_value_heads": 6,
+                "text_head_dim": 2,
+            }
+        }
+    }
+    manifest = normalize_manifest(path, plan=plan)
+    recommended = manifest["recommended"]
+    # Legacy 0.5B GQA normalization still runs...
+    assert recommended["text_kv_heads_4"]["0"] == [4, 5, 6, 7]
+    # ...and the plan's own widths are derived from the same raw scores.
+    assert recommended["text_mlp_indices_6"]["1"] == [6, 7, 8, 9, 10, 11]
+    assert recommended["text_kv_heads_6"]["0"] == [2, 3, 4, 5, 6, 7]
+    assert recommended["text_q_heads_12"]["0"] == list(range(4, 16))
+    assert "text_hidden_indices_8" not in recommended
+    assert manifest["text_mlp_score_source"] == {"1.5b": "mlp_scores"}
+    assert json.loads(path.read_text(encoding="utf-8"))["recommended"] == recommended
+
+
+def test_runner_width_path_builds_at_full_depth_then_recovers(tmp_path: Path, capsys):
+    from scripts.run_gui_owl_progressive_distillation import run
+
+    corpus = tmp_path / "recovery.jsonl"
+    corpus.write_text('{"messages": []}\n', encoding="utf-8")
+    calibration = tmp_path / "calibration.json"
+    calibration.write_text(json.dumps(_tiny_calibration()), encoding="utf-8")
+    plan = _plan()
+    plan["recovery_corpora"] = {
+        "broad": {"path": str(corpus), "required": True, "min_records": 1}
+    }
+    plan["progressive"]["1.5b"] = {
+        "source": "mPLUG/GUI-Owl-1.5-2B-Instruct",
+        "text_depth_schedule": [],
+        "structured_width_pruning": True,
+    }
+    plan["students"]["1.5b"]["initialized"] = str(tmp_path / "init")
+    config = tmp_path / "plan.json"
+    config.write_text(json.dumps(plan), encoding="utf-8")
+
+    manifest = run(
+        argparse.Namespace(
+            student="1.5b",
+            config=str(config),
+            teacher_model=None,
+            calibration_manifest=str(calibration),
+            device="cpu",
+            work_root=str(tmp_path / "work"),
+            intermediate_recovery_updates=1,
+            max_updates=None,
+            max_records_per_corpus=None,
+            resume=False,
+            skip_on_policy=True,
+            skip_specialize=True,
+            dry_run=True,
+        )
+    )
+    commands = [line for line in capsys.readouterr().out.splitlines() if line.startswith("+ ")]
+    assert "build_gui_owl_student.py" in commands[0]
+    assert "--target-text-layers" not in commands[0]
+    assert RECOVERY_TRAINER in commands[1]
+    assert manifest["stages"][0] == {
+        "width_pruned": True,
+        "checkpoint": str(tmp_path / "work" / "width-recovered"),
+    }
 
 
 def test_compact_vision_keeps_source_deepstack_blocks_at_matching_target_taps():

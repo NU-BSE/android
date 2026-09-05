@@ -211,7 +211,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             f"calibration manifest is missing: {calibration}; run calibrate_gui_owl_compression.py first"
         )
     if not args.dry_run:
-        normalized = normalize_manifest(calibration)
+        normalized = normalize_manifest(calibration, plan=plan)
         if normalized.get("gqa_group_consistent") is not True:
             raise RuntimeError("calibration did not preserve grouped-query attention head groups")
 

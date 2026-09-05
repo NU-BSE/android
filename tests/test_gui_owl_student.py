@@ -110,7 +110,171 @@ def test_student_config_preserves_token_contract_and_changes_architecture():
     assert half_b["vision_config"]["depth"] == 12
     assert half_b["vision_config"]["hidden_size"] == 768
     assert half_b["vision_config"]["out_hidden_size"] == 1024
-    assert half_b["vision_config"]["deepstack_visual_indexes"] == [3, 7, 11]
+    # Source taps 5/11/17 land at compact positions 2/5/8; the plan and the
+    # deepstack-aligned normalizer agree, so the fallback spec must too.
+    assert half_b["vision_config"]["deepstack_visual_indexes"] == [2, 5, 8]
+
+
+def test_head_pruning_keeps_residual_width_and_inherited_head_dim():
+    from dataclasses import replace
+
+    from android_drlqn.gui_owl_student import width_pruned_axes
+
+    # Qwen3 maps hidden -> heads * head_dim, so 12 heads of 128 on a 2048-wide
+    # residual is a valid student even though 2048 % 12 != 0.
+    narrow = replace(
+        DEFAULT_STUDENT_SPECS["1.5b"],
+        text_layers=28,
+        text_attention_heads=12,
+        text_key_value_heads=6,
+        text_intermediate_size=4096,
+    )
+    config = build_student_config_dict(TEACHER_CONFIG, narrow)
+    assert config["text_config"]["hidden_size"] == 2048
+    assert config["text_config"]["num_attention_heads"] == 12
+    assert config["text_config"]["num_key_value_heads"] == 6
+    assert config["text_config"]["head_dim"] == 128
+    assert config["text_config"]["intermediate_size"] == 4096
+    assert width_pruned_axes(narrow, TEACHER_CONFIG) == {
+        "text_mlp": (6144, 4096),
+        "text_q_heads": (16, 12),
+        "text_kv_heads": (8, 6),
+    }
+    assert width_pruned_axes(replace(narrow, text_attention_heads=16, text_key_value_heads=8, text_intermediate_size=6144), TEACHER_CONFIG) == {}
+
+    with pytest.raises(ValueError, match="head_dim"):
+        build_student_config_dict(TEACHER_CONFIG, replace(narrow, text_head_dim=64))
+    with pytest.raises(ValueError, match="exceeds"):
+        width_pruned_axes(replace(narrow, text_intermediate_size=8192), TEACHER_CONFIG)
+
+
+def _width_calibration() -> dict[str, object]:
+    layers = 3
+    return {
+        "schema_version": 2,
+        "text": {
+            "layers": layers,
+            "hidden_size": 8,
+            "attention_heads": 4,
+            "key_value_heads": 2,
+            "head_dim": 2,
+            "hidden_scores": [0.1, 9.0, 0.2, 8.0, 0.3, 7.0, 0.4, 6.0],
+            "mlp_scores": {str(i): [1.0, 2.0, 3.0, 4.0, 5.0, 6.0] for i in range(layers)},
+            "mlp_activation_scores": {
+                str(i): [6.0, 5.0, 4.0, 3.0, 2.0, 1.0] for i in range(layers)
+            },
+            "q_head_scores": {str(i): [1.0, 1.0, 9.0, 9.0] for i in range(layers)},
+            "kv_head_scores": {str(i): [0.0, 5.0] for i in range(layers)},
+        },
+        # The tower shape is known but no image ever exercised it.
+        "vision": {"ready": False, "hidden_size": 1024, "attention_heads": 16},
+        "recommended": {},
+    }
+
+
+def test_width_selections_are_derived_only_for_narrowed_axes():
+    from dataclasses import replace
+
+    from android_drlqn.gui_owl_student import derive_width_selections
+
+    base = replace(
+        DEFAULT_STUDENT_SPECS["1.5b"],
+        text_layers=3,
+        text_hidden_size=8,
+        text_intermediate_size=6,
+        text_attention_heads=4,
+        text_key_value_heads=2,
+        text_head_dim=2,
+    )
+    assert derive_width_selections(_width_calibration(), base) == {}
+
+    mlp_only = replace(base, text_intermediate_size=3)
+    derived = derive_width_selections(_width_calibration(), mlp_only)
+    # The gated activation that enters down_proj outranks the gate pre-activation.
+    assert derived["text_mlp_indices_3"] == {"0": [0, 1, 2], "1": [0, 1, 2], "2": [0, 1, 2]}
+    assert derived["text_mlp_score_source"] == "mlp_activation_scores"
+    assert "text_hidden_indices_8" not in derived
+    assert not any(key.startswith("text_q_heads") for key in derived)
+
+    legacy = _width_calibration()
+    del legacy["text"]["mlp_activation_scores"]
+    fallback = derive_width_selections(legacy, mlp_only)
+    assert fallback["text_mlp_indices_3"]["0"] == [3, 4, 5]
+    assert fallback["text_mlp_score_source"] == "mlp_scores"
+
+    heads = replace(base, text_attention_heads=2, text_key_value_heads=1)
+    derived = derive_width_selections(_width_calibration(), heads)
+    # Whole GQA groups: KV head 1 keeps query heads 2 and 3.
+    assert derived["text_kv_heads_1"]["0"] == [1]
+    assert derived["text_q_heads_2"]["0"] == [2, 3]
+
+    residual = replace(base, text_hidden_size=4)
+    derived = derive_width_selections(_width_calibration(), residual)
+    assert derived["text_hidden_indices_4"] == [1, 3, 5, 7]
+
+    with pytest.raises(ValueError, match="vision"):
+        derive_width_selections(_width_calibration(), replace(base, vision_hidden_size=512, vision_heads=8))
+
+
+def test_builder_refuses_gate_energy_neuron_ranking_for_text_mlp():
+    from dataclasses import replace
+
+    from scripts.build_gui_owl_student import _WidthSelectors
+
+    source_config = {
+        "text_config": {
+            "hidden_size": 8,
+            "intermediate_size": 6,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 2,
+            "head_dim": 2,
+        },
+        "vision_config": {
+            "hidden_size": 1024,
+            "intermediate_size": 4096,
+            "num_heads": 16,
+            "spatial_merge_size": 2,
+        },
+    }
+    spec = replace(
+        DEFAULT_STUDENT_SPECS["1.5b"],
+        text_layers=3,
+        text_hidden_size=8,
+        text_intermediate_size=3,
+        text_attention_heads=4,
+        text_key_value_heads=2,
+        text_head_dim=2,
+    )
+    legacy = _width_calibration()
+    del legacy["text"]["mlp_activation_scores"]
+    # A cached recommendation from the retired ranking must not rescue it either.
+    legacy["recommended"]["text_mlp_indices_3"] = {str(i): [3, 4, 5] for i in range(3)}
+    with pytest.raises(RuntimeError, match="mlp_activation_scores"):
+        _WidthSelectors(
+            calibration=legacy,
+            source_config=source_config,
+            target_spec=spec,
+            text_original_ids=(0, 1, 2),
+            vision_original_ids=tuple(range(24)),
+        )
+
+    current = _width_calibration()
+    current["recommended"]["text_mlp_indices_3"] = {str(i): [3, 4, 5] for i in range(3)}
+    selectors = _WidthSelectors(
+        calibration=current,
+        source_config=source_config,
+        target_spec=spec,
+        text_original_ids=(0, 1, 2),
+        vision_original_ids=tuple(range(24)),
+    )
+    # Derived from the gated activation, not the stale cached ranking.
+    assert selectors.text_mlp(1) == (0, 1, 2)
+    assert selectors.selection_sources == {"text_mlp": "derived_from_calibration_scores"}
+    assert selectors.text_mlp_score_source == "mlp_activation_scores"
+    # Untouched axes map to identity, so unchanged tensors copy exactly.
+    assert selectors.text_q(0) == tuple(range(8))
+    assert selectors.text_hidden == tuple(range(8))
+    assert selectors.vision_mlp(0) == tuple(range(4096))
 
 
 def test_state_dict_layer_routing_supports_text_and_vision():

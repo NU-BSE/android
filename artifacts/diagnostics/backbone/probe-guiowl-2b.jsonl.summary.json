@@ -1,0 +1,11 @@
+{
+  "corpus": "/private/tmp/claude-501/-Users-ilia-Desktop-Creepy-IM-code-android/a03f8755-456a-4274-a974-6e4e5ed3df59/scratchpad/gui-policy-local.jsonl",
+  "median_distance_to_box": 61.5,
+  "model": "artifacts/teachers/gui-owl-2b-merged",
+  "output": "artifacts/diagnostics/backbone/probe-guiowl-2b.jsonl",
+  "parsed_point_rate": 1.0,
+  "point_in_box_rate": 0.39634146341463417,
+  "records": 164,
+  "rescaled_from_pixel_space": 0,
+  "within_50_of_box_centre_rate": 0.2865853658536585
+}

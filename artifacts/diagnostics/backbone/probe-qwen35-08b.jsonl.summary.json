@@ -1,0 +1,11 @@
+{
+  "corpus": "/private/tmp/claude-501/-Users-ilia-Desktop-Creepy-IM-code-android/a03f8755-456a-4274-a974-6e4e5ed3df59/scratchpad/gui-policy-local.jsonl",
+  "median_distance_to_box": 170.0,
+  "model": "Qwen/Qwen3.5-0.8B",
+  "output": "artifacts/diagnostics/backbone/probe-qwen35-08b.jsonl",
+  "parsed_point_rate": 0.9695121951219512,
+  "point_in_box_rate": 0.32926829268292684,
+  "records": 164,
+  "rescaled_from_pixel_space": 0,
+  "within_50_of_box_centre_rate": 0.1951219512195122
+}

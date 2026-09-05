@@ -19,6 +19,7 @@ from typing import Mapping, Sequence
 
 from android_drlqn.gui_owl_student import (
     build_student_config_dict,
+    derive_width_selections,
     expand_head_indices,
     expand_spatial_merge_indices,
     load_calibration_manifest,
@@ -32,6 +33,8 @@ from android_drlqn.gui_owl_student import (
     teacher_key_for_student,
     text_layer_gap_limit,
     text_layer_selection_is_safe,
+    width_pruned_axes,
+    width_selection_key,
 )
 
 
@@ -181,6 +184,17 @@ def _slice_two_dims(tensor, rows: Sequence[int], cols: Sequence[int], torch_modu
 
 
 class _WidthSelectors:
+    """Per-axis structured selections; an unchanged axis maps to identity.
+
+    Only the axes a spec narrows need calibration evidence. Keeping the residual
+    width and pruning MLP neurons or GQA groups is a local edit inside each
+    block, so it never touches embedding, lm_head, or merger tensors and does
+    not need a vision-exercised calibration. Selections come from the manifest's
+    normalized ``recommended`` entries when present and are otherwise derived
+    from its raw scores, so a manifest calibrated for the 0.5B target can serve
+    any other width.
+    """
+
     def __init__(
         self,
         *,
@@ -190,53 +204,111 @@ class _WidthSelectors:
         text_original_ids: Sequence[int],
         vision_original_ids: Sequence[int],
     ) -> None:
-        if not bool(calibration.get("width_pruning_ready")):
+        self.axes = width_pruned_axes(target_spec, source_config)
+        narrows_vision = any(axis.startswith("vision_") for axis in self.axes)
+        if narrows_vision and not bool(calibration.get("width_pruning_ready")):
             raise RuntimeError(
-                "0.5B structured width pruning requires a calibration run that exercised the vision tower"
+                "vision width pruning requires a calibration run that exercised the vision tower"
             )
-        recommended = calibration.get("recommended")
-        if not isinstance(recommended, Mapping):
-            raise ValueError("calibration manifest lacks recommended selections")
+        recommended_raw = calibration.get("recommended")
+        recommended = dict(recommended_raw) if isinstance(recommended_raw, Mapping) else {}
+        derived = derive_width_selections(calibration, target_spec)
+        self.selection_sources: dict[str, str] = {}
+
+        def selection(axis: str, size: int) -> object:
+            # Derived selections win: they come from the raw scores with the
+            # current importance rule, whereas a recommended entry may be a
+            # ranking an older calibrator cached under a rule since retired.
+            key = width_selection_key(axis, size)
+            if key in derived:
+                self.selection_sources[axis] = "derived_from_calibration_scores"
+                return derived[key]
+            if key in recommended:
+                self.selection_sources[axis] = "recommended"
+                return recommended[key]
+            raise ValueError(f"calibration manifest cannot provide {key}")
+
+        self.text_mlp_score_source = derived.get("text_mlp_score_source")
+        if "text_mlp" in self.axes and self.text_mlp_score_source != "mlp_activation_scores":
+            # Ranking neurons by gate_proj pre-activation energy prunes the
+            # super-activation neurons: at FFN 4096 (a third removed) the 2B
+            # emits EOS as its first token with p=0.35 and parses 0 of 128 GUI
+            # records, and a random ranking does no worse. Ranking by the gated
+            # activation that enters down_proj keeps the model coherent at the
+            # same dose, so the older metric is refused rather than fallen back to.
+            raise RuntimeError(
+                "text MLP width pruning requires text.mlp_activation_scores in the "
+                "calibration manifest; the legacy gate-energy ranking collapses the "
+                "model. Re-run calibrate_gui_owl_compression.py."
+            )
+
         text_cfg = source_config["text_config"]
         vision_cfg = source_config["vision_config"]
         self.source_text_hidden = int(text_cfg["hidden_size"])
         self.source_text_heads = int(text_cfg["num_attention_heads"])
         self.source_text_kv_heads = int(text_cfg["num_key_value_heads"])
         self.text_head_dim = int(text_cfg.get("head_dim") or self.source_text_hidden // self.source_text_heads)
+        self.source_text_mlp = int(text_cfg["intermediate_size"])
         self.source_vision_hidden = int(vision_cfg["hidden_size"])
         self.source_vision_heads = int(vision_cfg["num_heads"])
+        self.source_vision_mlp = int(vision_cfg["intermediate_size"])
         self.vision_head_dim = self.source_vision_hidden // self.source_vision_heads
         self.merge_units = int(vision_cfg.get("spatial_merge_size") or 1) ** 2
+        self.target_spec = target_spec
+        self.text_original_ids = tuple(int(value) for value in text_original_ids)
+        self.vision_original_ids = tuple(int(value) for value in vision_original_ids)
 
-        hidden = recommended.get(f"text_hidden_indices_{target_spec.text_hidden_size}")
-        if not isinstance(hidden, Sequence) or isinstance(hidden, (str, bytes)):
-            raise ValueError("calibration manifest lacks text residual-channel selection")
-        self.text_hidden = tuple(int(value) for value in hidden)
-        if len(self.text_hidden) != target_spec.text_hidden_size:
-            raise ValueError("text hidden selection has wrong size")
+        if "text_hidden" in self.axes:
+            hidden = selection("text_hidden", target_spec.text_hidden_size)
+            if not isinstance(hidden, Sequence) or isinstance(hidden, (str, bytes)):
+                raise ValueError("text residual-channel selection must be an array")
+            self.text_hidden = tuple(int(value) for value in hidden)
+            if len(self.text_hidden) != target_spec.text_hidden_size:
+                raise ValueError("text hidden selection has wrong size")
+        else:
+            self.text_hidden = tuple(range(self.source_text_hidden))
 
-        vision_hidden = recommended.get(f"vision_hidden_indices_{target_spec.vision_hidden_size}")
-        if not isinstance(vision_hidden, Sequence) or isinstance(vision_hidden, (str, bytes)):
-            raise ValueError("calibration manifest lacks vision residual-channel selection")
-        self.vision_hidden = tuple(int(value) for value in vision_hidden)
-        if len(self.vision_hidden) != target_spec.vision_hidden_size:
-            raise ValueError("vision hidden selection has wrong size")
+        if "vision_hidden" in self.axes:
+            vision_hidden = selection("vision_hidden", target_spec.vision_hidden_size)
+            if not isinstance(vision_hidden, Sequence) or isinstance(vision_hidden, (str, bytes)):
+                raise ValueError("vision residual-channel selection must be an array")
+            self.vision_hidden = tuple(int(value) for value in vision_hidden)
+            if len(self.vision_hidden) != target_spec.vision_hidden_size:
+                raise ValueError("vision hidden selection has wrong size")
+        else:
+            self.vision_hidden = tuple(range(self.source_vision_hidden))
         self.vision_merge = expand_spatial_merge_indices(
             self.vision_hidden,
             self.source_vision_hidden,
             self.merge_units,
         )
 
-        self.text_q_heads_raw = recommended.get(f"text_q_heads_{target_spec.text_attention_heads}")
-        self.text_kv_heads_raw = recommended.get(f"text_kv_heads_{target_spec.text_key_value_heads}")
-        self.text_mlp_raw = recommended.get(f"text_mlp_indices_{target_spec.text_intermediate_size}")
-        self.vision_heads_raw = recommended.get(f"vision_heads_{target_spec.vision_heads}")
-        self.vision_mlp_raw = recommended.get(f"vision_mlp_indices_{target_spec.vision_intermediate_size}")
-        self.target_spec = target_spec
-        self.text_original_ids = tuple(int(value) for value in text_original_ids)
-        self.vision_original_ids = tuple(int(value) for value in vision_original_ids)
+        heads_pruned = "text_q_heads" in self.axes or "text_kv_heads" in self.axes
+        self.text_q_heads_raw = (
+            selection("text_q_heads", target_spec.text_attention_heads) if heads_pruned else None
+        )
+        self.text_kv_heads_raw = (
+            selection("text_kv_heads", target_spec.text_key_value_heads) if heads_pruned else None
+        )
+        self.text_mlp_raw = (
+            selection("text_mlp", target_spec.text_intermediate_size)
+            if "text_mlp" in self.axes
+            else None
+        )
+        self.vision_heads_raw = (
+            selection("vision_heads", target_spec.vision_heads)
+            if "vision_heads" in self.axes
+            else None
+        )
+        self.vision_mlp_raw = (
+            selection("vision_mlp", target_spec.vision_intermediate_size)
+            if "vision_mlp" in self.axes
+            else None
+        )
 
     def text_q(self, target_layer: int) -> tuple[int, ...]:
+        if self.text_q_heads_raw is None:
+            return tuple(range(self.source_text_heads * self.text_head_dim))
         original = self.text_original_ids[target_layer]
         heads = _indices_by_original_layer(
             self.text_q_heads_raw, original, self.target_spec.text_attention_heads
@@ -244,6 +316,8 @@ class _WidthSelectors:
         return expand_head_indices(heads, self.text_head_dim)
 
     def text_kv(self, target_layer: int) -> tuple[int, ...]:
+        if self.text_kv_heads_raw is None:
+            return tuple(range(self.source_text_kv_heads * self.text_head_dim))
         original = self.text_original_ids[target_layer]
         heads = _indices_by_original_layer(
             self.text_kv_heads_raw, original, self.target_spec.text_key_value_heads
@@ -251,12 +325,16 @@ class _WidthSelectors:
         return expand_head_indices(heads, self.text_head_dim)
 
     def text_mlp(self, target_layer: int) -> tuple[int, ...]:
+        if self.text_mlp_raw is None:
+            return tuple(range(self.source_text_mlp))
         original = self.text_original_ids[target_layer]
         return _indices_by_original_layer(
             self.text_mlp_raw, original, self.target_spec.text_intermediate_size
         )
 
     def vision_attn(self, target_layer: int) -> tuple[int, ...]:
+        if self.vision_heads_raw is None:
+            return tuple(range(self.source_vision_hidden))
         original = self.vision_original_ids[target_layer]
         heads = _indices_by_original_layer(
             self.vision_heads_raw, original, self.target_spec.vision_heads
@@ -271,6 +349,8 @@ class _WidthSelectors:
         )
 
     def vision_mlp(self, target_layer: int) -> tuple[int, ...]:
+        if self.vision_mlp_raw is None:
+            return tuple(range(self.source_vision_mlp))
         original = self.vision_original_ids[target_layer]
         return _indices_by_original_layer(
             self.vision_mlp_raw, original, self.target_spec.vision_intermediate_size
@@ -461,8 +541,10 @@ def build(args: argparse.Namespace) -> dict[str, object]:
     target_text_depth = int(args.target_text_layers or spec.text_layers)
     if target_text_depth > len(source_text_ids):
         raise ValueError("target text depth cannot exceed source depth")
-    if args.student == "0.5b" and target_text_depth != spec.text_layers:
-        raise ValueError("0.5B width pruning must use its final text depth")
+    pruned_axes = width_pruned_axes(spec, source_config)
+    width_pruned = bool(pruned_axes)
+    if width_pruned and target_text_depth != spec.text_layers:
+        raise ValueError("structured width pruning must use the student's final text depth")
 
     selected_text_ids = _select_text_layers(calibration, source_text_ids, target_text_depth)
     text_layer_map = source_positions_for_layer_ids(source_text_ids, selected_text_ids)
@@ -509,14 +591,6 @@ def build(args: argparse.Namespace) -> dict[str, object]:
         )
     source_model.eval()
 
-    source_text_hidden = int(source_config["text_config"]["hidden_size"])
-    source_vision_hidden = int(source_config["vision_config"]["hidden_size"])
-    width_pruned = (
-        source_text_hidden != spec.text_hidden_size
-        or source_vision_hidden != spec.vision_hidden_size
-        or int(source_config["text_config"]["intermediate_size"]) != spec.text_intermediate_size
-        or int(source_config["vision_config"]["intermediate_size"]) != spec.vision_intermediate_size
-    )
     width_selectors = None
     if width_pruned:
         width_selectors = _WidthSelectors(
@@ -594,6 +668,17 @@ def build(args: argparse.Namespace) -> dict[str, object]:
         "vision_source_positions": list(vision_layer_map),
         "width_pruned": width_pruned,
         "width_selection_method": "activation_ranked_structured_indices" if width_pruned else None,
+        "width_pruned_axes": {
+            axis: {"source": source, "target": target}
+            for axis, (source, target) in pruned_axes.items()
+        },
+        "width_selection_sources": (
+            dict(width_selectors.selection_sources) if width_selectors is not None else {}
+        ),
+        "text_mlp_score_source": (
+            width_selectors.text_mlp_score_source if width_selectors is not None else None
+        ),
+        "text_head_dim": spec.text_head_dim,
         "prefix_dimension_truncation_used": False,
         "copy": copy_stats,
         "dtype": args.dtype,

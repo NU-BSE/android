@@ -20,6 +20,13 @@ import json
 from pathlib import Path
 from typing import Mapping, Sequence
 
+from android_drlqn.gui_owl_student import (
+    derive_width_selections,
+    grouped_query_kv_selection,
+    load_student_plan,
+    plan_student_specs,
+)
+
 
 SOURCE_DEEPSTACK_VISUAL_INDEXES = (5, 11, 17)
 TARGET_DEEPSTACK_VISUAL_INDEXES = (2, 5, 8)
@@ -33,54 +40,6 @@ def _floats(value: object, *, name: str) -> list[float]:
     if not result:
         raise ValueError(f"{name} cannot be empty")
     return result
-
-
-def grouped_query_kv_selection(
-    q_scores: Sequence[object],
-    kv_scores: Sequence[object],
-    *,
-    target_q_heads: int,
-    target_kv_heads: int,
-) -> tuple[tuple[int, ...], tuple[int, ...]]:
-    q = [float(value) for value in q_scores]
-    kv = [float(value) for value in kv_scores]
-    if not q or not kv:
-        raise ValueError("query/KV head scores cannot be empty")
-    if len(q) % len(kv):
-        raise ValueError("source query-head count must be divisible by KV-head count")
-    if target_q_heads % target_kv_heads:
-        raise ValueError("target query-head count must be divisible by target KV-head count")
-    source_group = len(q) // len(kv)
-    target_group = target_q_heads // target_kv_heads
-    if source_group != target_group:
-        raise ValueError(
-            "structured GQA pruning requires the source and target query/KV group size to match"
-        )
-    if not 1 <= target_kv_heads <= len(kv):
-        raise ValueError("target KV-head count must fit inside source KV heads")
-
-    group_scores: list[tuple[float, int]] = []
-    for kv_index, kv_score in enumerate(kv):
-        q_group = q[kv_index * source_group : (kv_index + 1) * source_group]
-        score = float(kv_score) + sum(q_group) / len(q_group)
-        group_scores.append((score, kv_index))
-    selected_kv = tuple(
-        sorted(
-            index
-            for _, index in sorted(
-                group_scores,
-                key=lambda item: (-item[0], item[1]),
-            )[:target_kv_heads]
-        )
-    )
-    selected_q = tuple(
-        head
-        for kv_index in selected_kv
-        for head in range(kv_index * source_group, (kv_index + 1) * source_group)
-    )
-    if len(selected_q) != target_q_heads:
-        raise RuntimeError("grouped-query selection produced the wrong query-head count")
-    return selected_q, selected_kv
 
 
 def _top_scored_indices(scores: Sequence[float], candidates: Sequence[int], count: int) -> tuple[int, ...]:
@@ -144,7 +103,17 @@ def deepstack_aligned_vision_selection(
     return result
 
 
-def normalize_manifest(path: str | Path) -> dict[str, object]:
+def normalize_manifest(
+    path: str | Path, *, plan: Mapping[str, object] | None = None
+) -> dict[str, object]:
+    """Rewrite ``path`` with GQA-consistent, deepstack-aligned, plan-complete selections.
+
+    ``plan`` lists the student architectures whose width selections the
+    manifest must carry; every narrowed axis of every student is derived from
+    the recorded raw scores, so a manifest calibrated before a width target
+    existed still serves it without re-running the teacher.
+    """
+
     target = Path(path)
     value = json.loads(target.read_text(encoding="utf-8"))
     if not isinstance(value, Mapping):
@@ -203,7 +172,26 @@ def normalize_manifest(path: str | Path) -> dict[str, object]:
         normalized_layers[str(TARGET_VISION_DEPTH)] = list(deepstack_selection)
         normalized_recommended["vision_layers_by_depth"] = normalized_layers
 
+    # Width selections for every student the plan declares. derive_width_selections
+    # ranks whole GQA groups the same way as above, so the two agree wherever they
+    # overlap, and it only emits the axes a student actually narrows.
+    derived_sources: dict[str, str] = {}
+    for spec in plan_student_specs(plan):
+        try:
+            derived = derive_width_selections(manifest, spec)
+        except ValueError:
+            # A manifest without vision evidence cannot serve a vision-narrowing
+            # student; the builder refuses that build explicitly.
+            continue
+        source = derived.pop("text_mlp_score_source", None)
+        derived.pop("vision_mlp_score_source", None)
+        if isinstance(source, str):
+            derived_sources[spec.name] = source
+        normalized_recommended.update(derived)
+
     manifest["recommended"] = normalized_recommended
+    if derived_sources:
+        manifest["text_mlp_score_source"] = derived_sources
     manifest["gqa_group_consistent"] = True
     manifest["gqa_source_group_size"] = source_q_heads // source_kv_heads
     manifest["gqa_target_group_size"] = target_q_heads // target_kv_heads
@@ -229,8 +217,10 @@ def main(argv: list[str] | None = None) -> int:
         nargs="?",
         default="artifacts/calibration/gui-owl-compression.json",
     )
+    parser.add_argument("--config", default="config/gui_owl_students.json")
     args = parser.parse_args(argv)
-    print(json.dumps(normalize_manifest(args.manifest), indent=2, sort_keys=True))
+    plan = load_student_plan(args.config) if Path(args.config).is_file() else None
+    print(json.dumps(normalize_manifest(args.manifest, plan=plan), indent=2, sort_keys=True))
     return 0
 
 

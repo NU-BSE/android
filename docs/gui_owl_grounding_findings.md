@@ -8,6 +8,12 @@ none of the existing gates can see it.
 happens. One layer costs 59% of it; four costs all of it. Syntax survives
 intact throughout, which is why every acceptance gate passed.**
 
+Width pruning was tried next and fails the same way. The resolution is not a
+better prune: an off-the-shelf 0.87B multimodal model lands just under the
+production gates with no GUI training at all, while no pruned student ever
+left the constant-guess floor. Read the last two sections first if you are
+here to decide what to build.
+
 All measurements below use `compare_gui_outputs` — the same metric the
 production gates use — over held-out GUI-policy records under the shipping
 contract prompt, unless stated otherwise. `within50` is the share of
@@ -87,6 +93,118 @@ investigated: the contract prompt, the gate thresholds, the K3 clamp, the
 first-token weighting, the tail-layer protection, the recovery corpus modality,
 or the training budget.
 
+## Width pruning does not rescue it
+
+The open question above was whether the loss is specific to depth. It is
+not. Every row below keeps all 28 text layers and narrows one or more axes
+inside the blocks, built from the same merged teacher with the production
+builder (`scripts/build_gui_owl_student.py`, structured slicing, no prefix
+truncation) and measured with the same harness on the first 128 records of
+the same holdout (109 coordinate targets). No training anywhere.
+
+| variant | params | vs 1.5B | parse | action | median err | within50 | 95% CI |
+|---|---|---|---|---|---|---|---|
+| 28 layers, unpruned | 2.13B | +42% | 1.000 | 0.742 | 142.0 | **44.0%** | [35.1, 53.4] |
+| FFN 6144→4096 | 1.78B | +18% | 0.984 | 0.625 | 258.0 | **9.2%** | [5.1, 16.1] |
+| FFN 6144→3072 | 1.60B | +7% | 0.945 | 0.383 | 363.1 | **0.0%** | [0.0, 3.4] |
+| heads 16/8→12/6 | 2.04B | +36% | 0.000 | 0.000 | — | 0.0% | |
+| FFN 4096 + heads 12/6 | 1.69B | +12% | 0.000 | 0.000 | — | 0.0% | |
+| FFN 3072 + heads 12/6 | 1.51B | +1% | 0.000 | 0.000 | — | 0.0% | |
+| — | *constant-guess floor* | | | | 270.9 | *5.8%* | |
+
+MLP-neuron pruning reproduces the depth signature exactly: syntax intact,
+grounding gone. A third of the FFN removed sits where dropping two or three
+layers sits, just above the constant-guess floor, and the half-FFN cut that
+reaches the parameter budget is at zero. Per parameter removed it is somewhat
+gentler than depth (the 1.78B FFN-4096 model keeps 9% where the 1.93B depth-24
+model keeps 0%), but nowhere near the 38% gate, and the decay is monotonic
+with no plateau.
+
+Attention-head pruning is worse than either. Removing two of eight KV groups
+per layer leaves a model that answers a text-only prompt coherently and emits
+one or two tokens then EOS as soon as a screenshot is in context, for every
+record. Whatever those heads do, they do it over image tokens.
+
+Residual-width pruning, the axis the 0.5B recipe leans on hardest, collapses
+without any image at all: 2048→1792 degenerates into repetition and 2048→1536
+answers with EOS. So the three width axes the 0.5B build applies together
+(hidden 2048→1024, heads 16→8, FFN 6144→3072) each destroy the model on their
+own before the vision tower is touched.
+
+### The neuron-importance metric was wrong, and fixing it was necessary but not sufficient
+
+The first width run collapsed far harder than the table above: FFN 3072 gave
+121 of 128 empty generations and first-token EOS with p≈0.4, and a **random**
+neuron ranking did no worse (EOS p=0.27). The calibrator ranked MLP neurons by
+the energy of the `gate_proj` pre-activation, which is not what a neuron
+contributes: a large negative pre-activation has high energy and zero output
+through SiLU. Ranking by the gated activation that enters `down_proj` instead
+keeps the model coherent at FFN 4096 and even 3072 (text-only EOS p=0.002 /
+0.015 against 0.35 / 0.43), which is the difference between "dead" and the
+table above. The peak-activation ranking alone was not enough (coherent at
+4096, EOS at 3072); the mean gated energy is what the calibrator now records
+and the builder refuses to build a text-MLP width cut from a manifest without
+it. The same flaw was in the vision-MLP ranking (`linear_fc1` pre-GELU energy)
+and is fixed the same way.
+
+That fix moves generation from dead to intact. It moves grounding from 0% to
+0% at the budget, because activation energy does not know which neurons the
+coordinate tokens need any more than residual saliency knew which layers they
+needed.
+
+## A pretrained 0.87B backbone starts where the pruned students never arrived
+
+Everything above asks how to carve a small grounded model out of the 2B. That
+question has a cheaper answer: do not carve one, download one.
+
+Qwen3.5 is natively multimodal at every size, with no separate `-VL` branch.
+`Qwen/Qwen3.5-0.8B` is 873,438,784 parameters, and `transformers` 5.14.1 loads
+it as `Qwen3_5ForConditionalGeneration`. Measured on the same 192-record
+Android holdout, under the same shipping contract prompt, greedy, on MPS:
+
+| metric | GUI-Owl-2B | Qwen3.5-0.8B | gate |
+|---|---|---|---|
+| parse | 1.000 | 0.875 | 0.50 |
+| action name match | 0.760 | **0.635** | 0.65 |
+| within50 | 0.439 | **0.354** | 0.38 |
+| median coord error | 142.0 | **201.1** | 200 |
+| first-token EOS | 0.000 | 0.000 | 0.05 |
+| distinct action types | 5 | 3 | — |
+
+The 2B is adapter-merged and was fine-tuned on this corpus's own training
+split. The 0.8B has seen neither the corpus nor the output format. It is
+nevertheless within 1.5 points of the action gate, 2.6 of the coordinate gate
+and 1.1 of the median-error gate, at 41% of the parameters and zero GUI
+training. Every pruned student in this document scored **0.0%** within50 after
+paid recovery. Nothing in the compression program ever came within sight of
+these gates; an untrained general model does.
+
+To separate seeing from formatting, `probe_gui_grounding_backbone.py` asks for
+a tap point in any form and scores it against the annotated `target_bbox`,
+which the corpus already carries on 2335 of 2729 records and which no metric
+was using:
+
+| model | point in box | within 50px | within 200px | median miss |
+|---|---|---|---|---|
+| GUI-Owl-2B | 39.6% | 49.4% | 65.9% | 239px |
+| Qwen3.5-0.8B | 32.9% | 40.2% | 50.0% | 317px |
+| *best fixed point* | *22.0%* | | | |
+
+Both sit well above the 22.0% floor a model reaches by ignoring the screenshot
+and always tapping the single best point. The 0.8B emitted 151 distinct points
+out of 159, with no attractor, and hit 13 records the 2B missed, so its
+competence is not a subset of the teacher's. Its weakness is aim, not sight:
+the gap widens from 6.7 points at the box edge to 15.9 points at 200px, so it
+has the heavier tail of far misses. Its three emitted action types against the
+teacher's five is a coverage gap, not a grounding one.
+
+Two measurement notes worth keeping. The teacher scores 39.6% in-box under the
+neutral probe and 56.1% under the contract prompt, so prompt framing is worth
+roughly 16 points to it, and no cross-prompt comparison is meaningful.
+And a 50px radius is *stricter* than the target it is checking: the median
+annotated box is 224 by 64 on the 0..1000 scale, so `within50` fails clicks
+that would land on the element. Prefer point-in-box.
+
 ## Methodological findings worth keeping
 
 **Saliency scoring is orthogonal to grounding.** Layer 12 is the *lowest*
@@ -130,19 +248,47 @@ grounding whether or not that value is reused.
 
 ## Open directions
 
-Depth compression and grounding are incompatible on this architecture, so the
-1.5B target needs a different approach:
+Neither depth nor width compression of the text stack survives without
+training on this architecture, and every prune-then-recover run so far has
+recovered to the constant-guess floor. The measurement above says the target
+sizes are reachable without compressing anything, so that is the first
+direction and the rest are fallbacks.
 
-- **Width pruning instead of depth.** Untested for grounding; the 0.5B path
-  already has the machinery. Measurable locally with this same harness.
-- **Keep 28 layers, compress elsewhere.** Quantisation to hit the size target
-  rather than an architecture change.
-- **Reconstruct grounding explicitly.** Only if the above fail. The current
-  supervised signal is 3–4 coordinate tokens out of ~40 and provably converges
-  to the corpus median.
+- **Swap the backbone instead of building one.** Start the small students from
+  `Qwen3.5-0.8B` and `Qwen3.5-2B` rather than from a pruned 2B. This is the
+  only path measured to begin above the constant-guess floor. It is loader and
+  config work, not modelling work, but it is not free: the builder, metrics
+  and trainers all assume `qwen3_vl`. A `qwen3_5` backbone has no deepstack,
+  a decoupled `head_dim` of 256, and a hybrid stack of 18 linear-attention and
+  6 full-attention layers, which breaks the layer-selection contract outright.
+  Nothing in the depth or width machinery survives the swap, and none of it
+  needs to.
+- **Close the gap with post-training, not architecture.** The remaining
+  distance to the gates is a few points on three metrics. LiteGUI
+  (arXiv 2605.07505) moves a comparable backbone by about that much with
+  on-policy distillation and RL, and explicitly finds that SFT *degrades* a
+  small GUI agent, which is the same result this pipeline reached from the
+  other side.
+- **Keep 28 layers and full width; compress elsewhere.** Quantisation to hit
+  the size target rather than an architecture change. The 2.13B teacher at
+  Q4 is ~1.3 GB, under the 1.5B-at-bf16 file the target was sized for. This is
+  the fallback if the backbone swap stalls.
+- **Prune what grounding does not use.** The tied embedding is 311M of the
+  2.13B and covers a 151,936-token multilingual vocabulary; a vocabulary
+  restricted to the tokens the GUI/chat corpora and English need would remove
+  most of it without touching a single block. It is the only 15% of the model
+  with no reason to carry grounding, and it applies more strongly to
+  Qwen3.5-0.8B, where a 248,320-token vocabulary at hidden size 1024 is about
+  29% of the parameters.
+- **Grounding-targeted importance.** Rank neurons by their first-order Taylor
+  contribution to the coordinate-token loss on GUI records rather than by
+  activation energy. Only worth running if compression is revived.
+- **Reconstruct grounding explicitly.** Last resort. The current supervised
+  signal is 3–4 coordinate tokens out of ~40 and provably converges to the
+  corpus median.
 
-Whichever is chosen, the saliency metric should be validated against grounding
-before it drives another selection.
+Whichever is chosen, validate the selection against grounding with the width
+sweep, the layer ablation, or the backbone probe before it drives a paid run.
 
 ## Reproducing
 
@@ -184,3 +330,57 @@ Supporting tools added for this investigation:
   exactly the layers it would remove, without training.
 - `scripts/diagnose_gui_tool_call_failures.py` — buckets parse failures by the
   parser's own decision points, using `parse_gui_owl_output` as the oracle.
+- `scripts/sweep_gui_owl_width.py` — builds width variants of a checkpoint
+  with the production builder and measures grounding without training;
+  `--selection random` is the control for the importance metric.
+- `scripts/probe_gui_grounding_backbone.py` — scores raw screenshot grounding
+  against `target_bbox` with a format-free prompt, so a backbone that has
+  never seen the tool-call contract can still be measured. Predictions outside
+  0..1000 are rescaled by the real screenshot size, and the report says how
+  many needed it.
+
+The width sweep above was run as:
+
+```bash
+python scripts/sweep_gui_owl_width.py \
+  --source-model artifacts/teachers/gui-owl-2b-merged --device mps \
+  --corpus <corpus with local image paths> --max-records 128 --max-new-tokens 96 \
+  --variant ffn4096=text_intermediate_size:4096 \
+  --variant ffn3072=text_intermediate_size:3072 \
+  --variant heads12=text_attention_heads:12,text_key_value_heads:6 \
+  --variant budget=text_intermediate_size:3072,text_attention_heads:12,text_key_value_heads:6
+```
+
+against a manifest re-calibrated locally with the gated-activation neuron
+scores (`scripts/calibrate_gui_owl_compression.py --device mps`; the layer
+scores it produces match the CUDA manifest to three decimals).
+
+The backbone comparison was run as the three commands below. The candidate and
+the teacher go through the identical probe, and the candidate additionally goes
+through the production evaluator so format compliance is measured separately
+from grounding. `evaluate_gui_owl_policy_checkpoint.py` now resolves the model
+class by architecture rather than hardcoding Qwen3-VL, which is what lets a
+`qwen3_5` checkpoint be scored under the identical prompt and metric; it also
+accepts a Hugging Face repo id in place of a local directory.
+
+```bash
+python scripts/probe_gui_grounding_backbone.py --model Qwen/Qwen3.5-0.8B \
+  --corpus <corpus with local image paths> --device mps \
+  --max-records 192 --max-new-tokens 64 \
+  --output artifacts/diagnostics/backbone/probe-qwen35-08b.jsonl
+
+python scripts/probe_gui_grounding_backbone.py \
+  --model artifacts/teachers/gui-owl-2b-merged \
+  --corpus <corpus with local image paths> --device mps \
+  --max-records 192 --max-new-tokens 64 \
+  --output artifacts/diagnostics/backbone/probe-guiowl-2b.jsonl
+
+python scripts/evaluate_gui_owl_policy_production.py --checkpoint Qwen/Qwen3.5-0.8B \
+  --corpus <corpus with local image paths> --device mps \
+  --holdout-fraction 0.2 --max-records 192 --max-new-tokens 96 \
+  --output artifacts/diagnostics/backbone/contract-qwen35-08b.jsonl
+```
+
+The probe selects its holdout with the production evaluator's own shuffle, so
+both cover the same records, and it counts an unparseable answer as a miss
+rather than dropping it from the denominator.

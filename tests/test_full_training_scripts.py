@@ -21,7 +21,10 @@ def test_full_training_scripts_never_convert_to_gguf():
 def test_full_training_scripts_require_generation_acceptance():
     for size, path in SCRIPTS.items():
         text = path.read_text(encoding="utf-8")
-        assert 'value.get("accepted") is True' in text, size
+        # Every wrapper gates on the runner's acceptance check, which also
+        # requires measured action/coordinate correctness, not a bare
+        # `accepted: true` flag from a manifest that predates the grounding gate.
+        assert "_accepted(checkpoint, require_gui_correctness=True)" in text, size
         assert f"artifacts/students/v2/gui-owl-{size}-distilled" in text, size
 
 
