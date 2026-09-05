@@ -150,6 +150,14 @@ def main():
     parser.add_argument(
         "--environment-plugin", help="module:factory(profile) -> environment"
     )
+    parser.add_argument(
+        "--teacher-plugin",
+        help=(
+            "module:factory(config) -> teacher, overriding the configured "
+            "profile; project_gui_owl_teacher:create_teacher grades rollouts "
+            "with a local checkpoint and no network"
+        ),
+    )
     parser.add_argument("--mrpo-group-size", type=int, default=2)
     parser.add_argument("--mrpo-oversample-factor", type=int, default=2)
     parser.add_argument("--checkpoint-reward-weight", type=float, default=0.5)
@@ -191,6 +199,7 @@ def main():
             or teacher_config.early_access_acknowledged
         ),
         "student_plugin": resolved_student_plugin or "numpy-ci-student",
+        "teacher_plugin": args.teacher_plugin or "",
         "mrpo": {
             "group_size": args.mrpo_group_size,
             "oversample_factor": args.mrpo_oversample_factor,
@@ -219,11 +228,16 @@ def main():
             "real training requires --environment-plugin; CI replay requires --fixture"
         )
 
-    teacher = (
-        replay_teacher(actionable_tasks, matrix)
-        if teacher_config.profile is TeacherProfile.REPLAY
-        else StrictJsonTeacher(teacher_config, HttpTransport())
-    )
+    if args.teacher_plugin:
+        # A local teacher outranks the configured profile: the shipped default
+        # is flux3_early_access with early_access_acknowledged false and a null
+        # endpoint, and the replay teacher returns confidence 1.0 for every
+        # rollout, so neither can grade one.
+        teacher = load_plugin(args.teacher_plugin)(student_config)
+    elif teacher_config.profile is TeacherProfile.REPLAY:
+        teacher = replay_teacher(actionable_tasks, matrix)
+    else:
+        teacher = StrictJsonTeacher(teacher_config, HttpTransport())
     metrics = OnPolicyDistiller(
         student,
         teacher,

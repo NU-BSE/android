@@ -221,14 +221,31 @@ def _looks_like_settings_search_label(value: object) -> bool:
     return bool(text) and any(marker in text for marker in _SEARCH_MARKERS)
 
 
+# Settings Search runs in its own package and activity. Measured on API 29:
+# the homepage is com.android.settings/...homepage.SettingsHomepageActivity and
+# search is
+# com.android.settings.intelligence/...intelligence.search.SearchActivity.
+_SEARCH_SCREEN_MARKERS = (
+    "com.android.settings.intelligence",
+    "search.searchactivity",
+    "settingssearchactivity",
+)
+
+
 def _looks_like_settings_search_screen(
     observation: RolloutObservation,
 ) -> bool:
-    values = [
-        observation.activity,
-        *observation.visible_labels,
-    ]
-    return any(_looks_like_settings_search_label(value) for value in values)
+    """Whether the device is actually on the Settings Search screen.
+
+    This tests the focused component, not the visible labels. The labels test
+    it replaces matched the Settings homepage itself: the homepage carries a
+    permanent `search_bar` whose title reads "Search settings", so on API 29
+    every episode began on a screen the guard classified as search. The first
+    action of every rollout was therefore reverted with a -0.25 penalty and
+    `verified=False`, which punishes correct navigation.
+    """
+    target = f"{observation.package}/{observation.activity}".casefold()
+    return any(marker in target for marker in _SEARCH_SCREEN_MARKERS)
 
 # ---------------------------------------------------------------------------
 # Environment

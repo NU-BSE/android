@@ -35,6 +35,7 @@ from android_drlqn.distillation import (
     TeacherTarget,
 )
 from android_drlqn.document_curriculum import CurriculumTask
+from android_drlqn.gui_owl_contract import GUI_OWL_SYSTEM_PROMPT
 from android_drlqn.emulator_lab import EmulatorProfile
 
 DEFAULT_MODEL_ID = "mPLUG/GUI-Owl-1.5-2B-Instruct"
@@ -42,16 +43,23 @@ COORDINATE_SCALE = 1000
 DEFAULT_HISTORY_N = 4
 
 _TOOL_CALL_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.S)
+# A generation the parser rejects degrades to WAIT so a rollout can continue.
+# Consumers that grade a proposal must be able to tell that fallback apart from
+# a real WAIT, so the marker is a constant rather than an inline literal.
+UNPARSEABLE_FALLBACK_MESSAGE = (
+    "Unparseable GUI-Owl output; wait for a fresh observation."
+)
 _ACTION_RE = re.compile(r"(?:^|\n)Action:\s*(.*?)(?=\n<tool_call>|$)", re.S)
 
-_SYSTEM_PROMPT = """You are GUI-Owl-1.5 operating Android Settings.
-Return exactly one concise visible action conclusion and one tool call:
-Action: <what to do next and why, without hidden chain-of-thought>
-<tool_call>{\"name\": \"mobile.click|mobile.swipe|mobile.system_button|mobile.wait|mobile.answer|mobile.interact\", \"arguments\": {...}}</tool_call>
-Use integer screen coordinates on a 0..1000 scale. Choose one next action only.
-Never claim success before the environment verifies the transition. Never emit
-ADB, shell, root, AccessibilityService, DevicePolicyManager, or Settings
-Provider commands. Ask for confirmation before a sensitive setting change."""
+# The rollout prompt was a second, older copy of the contract. It wrote the
+# action space as a literal alternation inside a worked tool call, and the
+# merged 2B copied it verbatim on a live emulator screenshot:
+#   {"name": "mobile.click|mobile.system_button|mobile.wait|mobile.answer|..."}
+# which parses to ask_confirmation with no coordinate. That defect was fixed in
+# `gui_owl_contract.py` (600f48d) and the fix never reached this path. Rollouts
+# now run under the same prompt every gate, baseline and corpus is measured
+# under; there is one contract, not two.
+_SYSTEM_PROMPT = GUI_OWL_SYSTEM_PROMPT
 
 
 @dataclass(frozen=True)
@@ -345,9 +353,12 @@ class GUIOwlStudent:
         torch = _require_torch()
         try:
             from peft import LoraConfig, PeftModel, get_peft_model
+            # Resolve by architecture rather than hardcoding Qwen3-VL, so a
+            # qwen3_5 student runs the same rollout path. For a qwen3_vl
+            # checkpoint this is the same class.
             from transformers import (
+                AutoModelForImageTextToText,
                 AutoProcessor,
-                Qwen3VLForConditionalGeneration,
                 set_seed,
             )
         except ImportError as exc:
@@ -382,11 +393,11 @@ class GUIOwlStudent:
         )
         kwargs = {"attn_implementation": "sdpa"}
         try:
-            model = Qwen3VLForConditionalGeneration.from_pretrained(
+            model = AutoModelForImageTextToText.from_pretrained(
                 model_id, dtype=model_dtype, **kwargs
             )
         except TypeError:
-            model = Qwen3VLForConditionalGeneration.from_pretrained(
+            model = AutoModelForImageTextToText.from_pretrained(
                 model_id, torch_dtype=model_dtype, **kwargs
             )
         model = model.to(self.device)
@@ -396,19 +407,28 @@ class GUIOwlStudent:
             )
             self._policy_version = _checkpoint_step(Path(adapter_checkpoint))
         else:
+            # Qwen3.5 is a hybrid stack: its 18 linear-attention layers carry
+            # in_proj_qkv / in_proj_z / out_proj and none of q/k/v/o_proj, so
+            # the Qwen3-VL list reaches 96 modules and adapts none of them.
+            # Adding the three projections reaches 150 (see
+            # scripts/train_qwen35_gui_policy.py, where the same list is
+            # verified against the checkpoint).
+            targets = [
+                "q_proj",
+                "k_proj",
+                "v_proj",
+                "o_proj",
+                "gate_proj",
+                "up_proj",
+                "down_proj",
+            ]
+            if str(getattr(model.config, "model_type", "")).startswith("qwen3_5"):
+                targets += ["in_proj_qkv", "in_proj_z", "out_proj"]
             cfg = {
                 "rank": 16,
                 "alpha": 32,
                 "dropout": 0.0,
-                "target_modules": (
-                    "q_proj",
-                    "k_proj",
-                    "v_proj",
-                    "o_proj",
-                    "gate_proj",
-                    "up_proj",
-                    "down_proj",
-                ),
+                "target_modules": tuple(targets),
             }
             if lora:
                 cfg.update(lora)
@@ -503,7 +523,7 @@ class GUIOwlStudent:
                 kind,
                 None,
                 None,
-                "Unparseable GUI-Owl output; wait for a fresh observation.",
+                UNPARSEABLE_FALLBACK_MESSAGE,
                 distribution[tuple(ProposalKind).index(kind)],
                 distribution,
                 math.log(distribution[tuple(ProposalKind).index(kind)]),

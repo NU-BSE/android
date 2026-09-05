@@ -762,3 +762,45 @@ def test_create_environment_requires_an_emulator(monkeypatch, tmp_path):
         project_lab.create_environment(
             profile(), adb=AdbClient(runner=EmptyRunner()), screenshots_dir=tmp_path
         )
+
+
+def _observation(*, package: str, activity: str, labels: tuple[str, ...]) -> RolloutObservation:
+    return RolloutObservation(
+        screenshot_reference="file:///shot.png",
+        visible_labels=labels,
+        accessibility_summary={},
+        package=package,
+        activity=activity,
+        step_index=0,
+    )
+
+
+def test_settings_homepage_is_not_treated_as_the_search_screen():
+    # Measured on API 29: the Settings homepage carries a permanent
+    # `search_bar` whose title reads "Search settings". Matching that label
+    # made every episode start on a screen the guard called search, so the
+    # first action of every rollout was reverted with a -0.25 penalty.
+    homepage = _observation(
+        package="com.android.settings",
+        activity="com.android.settings.homepage.SettingsHomepageActivity",
+        labels=("Search settings", "Network & internet", "Connected devices"),
+    )
+    assert not project_lab._looks_like_settings_search_screen(homepage)
+
+
+def test_settings_search_activity_is_still_detected():
+    search = _observation(
+        package="com.android.settings.intelligence",
+        activity="com.android.settings.intelligence.search.SearchActivity",
+        labels=("Search…",),
+    )
+    assert project_lab._looks_like_settings_search_screen(search)
+
+
+def test_a_settings_subscreen_with_a_search_affordance_is_not_the_search_screen():
+    subscreen = _observation(
+        package="com.android.settings",
+        activity="com.android.settings.Settings$NetworkDashboardActivity",
+        labels=("Search settings", "Wi‑Fi", "Mobile network"),
+    )
+    assert not project_lab._looks_like_settings_search_screen(subscreen)
